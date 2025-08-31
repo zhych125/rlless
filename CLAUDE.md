@@ -11,9 +11,14 @@ rlless is a high-performance terminal log viewer for large files (40GB+) built w
 - Use `pub mod module_name;` in `lib.rs` or parent modules
 - Clear module boundaries with well-defined public APIs
 - Minimize cross-module dependencies
+- **Module size management**: When a module file becomes too large (>500 lines), refactor into a directory structure:
+  - Create a directory with the module name
+  - Break the large module into focused sub-modules within that directory
+  - The original module file becomes an import/re-export hub
+  - Maintain clean public API by selective re-exports
 
 ```rust
-// Good: src/file_handler.rs
+// Good: src/file_handler.rs (when small)
 pub struct MmapFileAccessor { /* ... */ }
 pub trait FileAccessor { /* ... */ }
 
@@ -21,6 +26,35 @@ pub trait FileAccessor { /* ... */ }
 pub mod file_handler;
 pub mod search;
 pub mod ui;
+
+// Good: Large module refactoring example
+// When src/file_handler.rs becomes >500 lines, refactor to:
+
+// src/file_handler.rs (becomes import/re-export hub)
+pub mod accessor;
+pub mod compression;
+pub mod memory_mapping;
+pub mod validation;
+
+// Re-export public API
+pub use accessor::{FileAccessor, AccessStrategy};
+pub use compression::{CompressionType, detect_compression};
+pub use memory_mapping::MmapFileAccessor;
+pub use validation::validate_file_path;
+
+// src/file_handler/accessor.rs
+pub trait FileAccessor { /* trait definition */ }
+pub enum AccessStrategy { /* enum definition */ }
+
+// src/file_handler/compression.rs  
+pub enum CompressionType { /* compression types */ }
+pub fn detect_compression() { /* detection logic */ }
+
+// src/file_handler/memory_mapping.rs
+pub struct MmapFileAccessor { /* implementation */ }
+
+// src/file_handler/validation.rs
+pub fn validate_file_path() { /* validation logic */ }
 ```
 
 ### 2. Keep Things Simple
