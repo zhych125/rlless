@@ -180,6 +180,25 @@ benches/
 - No global state - use dependency injection
 - No premature abstraction - start concrete, abstract when patterns emerge
 
+### ❌ Quick and Dirty Fixes
+- **Never implement hacky workarounds** just to get past compiler or linter errors
+- **Don't comment out code** or add placeholder implementations to "fix" compilation
+- **Don't suppress warnings** without understanding and addressing the root cause
+- **If you encounter a problem you can't solve properly:**
+  1. Stop and return the error message
+  2. Explain your analysis of what's wrong
+  3. Suggest potential approaches but don't implement incomplete solutions
+  4. Let's think through the problem together rather than patch around it
+
+```rust
+// ❌ Bad: Quick fix to make it compile
+// pub use app::Application;  // TODO: Fix later
+
+// ✅ Good: Acknowledge the issue and solve it properly
+// Error: Cannot re-export Application because app module doesn't define it yet
+// Solution: Either implement the type first, or restructure the exports
+```
+
 ## Performance Targets
 
 These targets guide our implementation decisions:

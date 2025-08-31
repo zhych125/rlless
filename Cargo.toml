@@ -1,0 +1,98 @@
+[package]
+name = "rlless"
+version = "0.1.0"
+edition = "2021"  # Using 2021 for stability, 2024 not yet stable
+rust-version = "1.75.0"
+description = "A high-performance terminal log viewer for large files with SIMD-optimized search"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/username/rlless"
+keywords = ["terminal", "log", "viewer", "performance", "search"]
+categories = ["command-line-utilities", "text-processing"]
+
+[[bin]]
+name = "rlless"
+path = "src/main.rs"
+
+[dependencies]
+# Essential P0 dependencies for core functionality
+tokio = { version = "1.47", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+# File handling and memory mapping
+memmap2 = "0.9"
+
+# ripgrep core libraries for SIMD-optimized search
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+
+# Terminal UI framework (ratatui exports crossterm, so we don't need separate crossterm)
+ratatui = { version = "0.27", features = ["crossterm"] }
+
+# Async traits support
+async-trait = "0.1"
+
+# Command-line argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Compression support (optional features)
+flate2 = { version = "1.0", optional = true }
+bzip2 = { version = "0.4", optional = true }
+xz2 = { version = "0.1", optional = true }
+
+# Configuration support (optional for Phase 4)
+serde = { version = "1.0", features = ["derive"], optional = true }
+toml = { version = "0.8", optional = true }
+dirs = { version = "5.0", optional = true }
+
+# Logging for development
+env_logger = "0.11"
+
+[dev-dependencies]
+# Testing dependencies
+proptest = "1.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.8"
+tokio-test = "0.4"
+
+[features]
+default = ["compression"]
+
+# Compression format support
+compression = ["flate2", "bzip2", "xz2"]
+
+# Configuration system (for Phase 4)
+config = ["serde", "toml", "dirs"]
+
+[profile.dev]
+# Some optimization for development without sacrificing compile time
+opt-level = 1
+debug = true
+overflow-checks = true
+
+[profile.release]
+# Maximum optimization for production builds
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[profile.test]
+# Optimize tests for faster execution
+opt-level = 1
+
+# Benchmark configurations
+[[bench]]
+name = "file_access"
+harness = false
+
+[[bench]]
+name = "search_performance"
+harness = false
+
+[[bench]]
+name = "memory_usage"
+harness = false
