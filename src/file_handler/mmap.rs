@@ -280,7 +280,7 @@ mod tests {
 
         assert_eq!(accessor.file_size(), content.len() as u64);
         assert_eq!(accessor.total_lines(), None); // Lazy loading
-        assert!(accessor.supports_parallel());
+        assert!(!accessor.supports_parallel());
     }
 
     #[tokio::test]

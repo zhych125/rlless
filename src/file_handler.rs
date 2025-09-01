@@ -6,6 +6,7 @@
 //! The module is organized into focused sub-modules:
 //! - `accessor`: Core FileAccessor trait and access strategies
 //! - `compression`: Compression format detection using magic numbers
+//! - `factory`: Factory for automatic accessor selection based on file characteristics
 //! - `in_memory`: In-memory file accessor with zero-copy line extraction
 //! - `mmap`: Memory-mapped file accessor for large files with lazy indexing
 //! - `validation`: File validation utilities
@@ -13,6 +14,7 @@
 
 pub mod accessor;
 pub mod compression;
+pub mod factory;
 pub mod in_memory;
 pub mod line_index;
 pub mod mmap;
@@ -21,6 +23,7 @@ pub mod validation;
 // Re-export public API for convenient access
 pub use accessor::{AccessStrategy, FileAccessor};
 pub use compression::{detect_compression, CompressionType};
+pub use factory::FileAccessorFactory;
 pub use in_memory::InMemoryFileAccessor;
 pub use mmap::MmapFileAccessor;
 pub use validation::validate_file_path;

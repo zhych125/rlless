@@ -205,7 +205,7 @@ pub mod tests {
 
             if line_idx >= self.lines.len() {
                 return Err(RllessError::file_error(
-                    &format!(
+                    format!(
                         "Line number {} out of bounds (total lines: {})",
                         line_number,
                         self.lines.len()
