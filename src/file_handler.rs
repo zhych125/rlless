@@ -7,9 +7,11 @@
 //! - `accessor`: Core FileAccessor trait and access strategies
 //! - `compression`: Compression format detection using magic numbers
 //! - `validation`: File validation utilities
+//! - `line_index`: SIMD-optimized line boundary detection and caching
 
 pub mod accessor;
 pub mod compression;
+pub mod line_index;
 pub mod validation;
 
 // Re-export public API for convenient access
