@@ -25,6 +25,7 @@ memmap2 = "0.9"
 memchr = "2.7"
 bstr = "1.9"
 parking_lot = "0.12"
+lru = "0.12"
 
 # ripgrep core libraries for SIMD-optimized search
 grep-searcher = "0.1"

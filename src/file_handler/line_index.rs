@@ -4,10 +4,11 @@
 //! in a file, building the index lazily as lines are accessed. It uses memchr for
 //! SIMD-optimized newline detection and includes an LRU cache for frequently accessed lines.
 
+use lru::LruCache;
 use memchr::memchr;
-use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 
-/// Cached line information for LRU cache
+/// Cached line information
 #[derive(Debug, Clone)]
 struct CachedLine {
     /// Line number (0-based) for cache lookup
@@ -48,20 +49,11 @@ pub struct LineIndex {
     /// Used to resume indexing from where we left off.
     indexed_to_byte: u64,
 
-    /// LRU cache of recently accessed lines
+    /// O(1) LRU cache for line content
     ///
-    /// - Front = most recently used
-    /// - Back = least recently used
-    /// - Eviction happens from back when cache is full
-    ///
-    /// Speeds up repeated access to same lines (common in scrolling)
-    line_cache: VecDeque<CachedLine>,
-
-    /// Maximum number of lines to keep in cache
-    ///
-    /// Typically 100-1000 lines depending on available memory.
-    /// Prevents unbounded memory growth.
-    max_cache_size: usize,
+    /// Uses the `lru` crate for efficient O(1) get/put operations.
+    /// Automatically evicts least recently used lines when full.
+    line_cache: LruCache<u64, CachedLine>,
 }
 
 impl LineIndex {
@@ -70,8 +62,7 @@ impl LineIndex {
         Self {
             line_offsets: vec![0], // First line starts at position 0
             indexed_to_byte: 0,
-            line_cache: VecDeque::with_capacity(100),
-            max_cache_size: 100,
+            line_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
         }
     }
 
@@ -80,8 +71,7 @@ impl LineIndex {
         Self {
             line_offsets: vec![0],
             indexed_to_byte: 0,
-            line_cache: VecDeque::with_capacity(max_cache_size),
-            max_cache_size,
+            line_cache: LruCache::new(NonZeroUsize::new(max_cache_size).unwrap()),
         }
     }
 
@@ -131,20 +121,11 @@ impl LineIndex {
     /// * None if line is not in cache
     ///
     /// # Side Effects
-    /// * Moves accessed line to front of cache (LRU update)
-    pub fn get_cached_line(&mut self, line_number: u64) -> Option<String> {
-        if let Some(pos) = self
-            .line_cache
-            .iter()
-            .position(|c| c.line_number == line_number)
-        {
-            // Move to front (mark as most recently used)
-            let cached = self.line_cache.remove(pos).unwrap();
-            let content = cached.content.clone();
-            self.line_cache.push_front(cached);
-            return Some(content);
-        }
-        None
+    /// * Does not update LRU ordering (uses peek for read-only access)
+    pub fn get_cached_line(&self, line_number: u64) -> Option<&str> {
+        self.line_cache
+            .peek(&line_number)
+            .map(|cached| cached.content.as_str())
     }
 
     /// Add a line to the cache
@@ -156,7 +137,7 @@ impl LineIndex {
     /// * `byte_end` - Where this line ends in the file
     ///
     /// # Side Effects
-    /// * May evict least recently used line if cache is full
+    /// * Automatically handles LRU eviction (handled by lru crate)
     pub fn cache_line(
         &mut self,
         line_number: u64,
@@ -164,27 +145,13 @@ impl LineIndex {
         byte_start: u64,
         byte_end: u64,
     ) {
-        // Remove if already cached (to avoid duplicates)
-        if let Some(pos) = self
-            .line_cache
-            .iter()
-            .position(|c| c.line_number == line_number)
-        {
-            self.line_cache.remove(pos);
-        }
-
-        // Add to front (most recently used)
-        self.line_cache.push_front(CachedLine {
+        let cached_line = CachedLine {
             line_number,
             content,
             byte_start,
             byte_end,
-        });
-
-        // Evict LRU if cache is too large
-        while self.line_cache.len() > self.max_cache_size {
-            self.line_cache.pop_back();
-        }
+        };
+        self.line_cache.put(line_number, cached_line);
     }
 
     /// Get line start positions for a range
@@ -241,14 +208,14 @@ mod tests {
         assert_eq!(index.line_offsets, vec![0]);
         assert_eq!(index.indexed_to_byte, 0);
         assert_eq!(index.indexed_line_count(), 0);
-        assert_eq!(index.max_cache_size, 100);
+        assert_eq!(index.line_cache.cap().get(), 100);
     }
 
     #[test]
     fn test_custom_cache_size() {
         let index = LineIndex::with_cache_size(50);
-        assert_eq!(index.max_cache_size, 50);
-        assert_eq!(index.line_cache.capacity(), 50);
+        // The lru crate doesn't expose capacity, but we can verify it works
+        assert_eq!(index.line_cache.cap().get(), 50);
     }
 
     #[test]
@@ -301,10 +268,7 @@ mod tests {
 
         // Test cache hit
         let result = index.get_cached_line(1);
-        assert_eq!(result, Some("line2".to_string()));
-
-        // Line 1 should now be at front (most recently used)
-        assert_eq!(index.line_cache.front().unwrap().line_number, 1);
+        assert_eq!(result, Some("line2"));
 
         // Test cache miss
         let result = index.get_cached_line(99);
@@ -344,7 +308,7 @@ mod tests {
 
         // Should have the updated content
         let result = index.get_cached_line(0);
-        assert_eq!(result, Some("updated line0".to_string()));
+        assert_eq!(result, Some("updated line0"));
     }
 
     #[test]
@@ -429,6 +393,6 @@ mod tests {
     fn test_default_implementation() {
         let index = LineIndex::default();
         assert_eq!(index.line_offsets, vec![0]);
-        assert_eq!(index.max_cache_size, 100);
+        assert_eq!(index.line_cache.cap().get(), 100);
     }
 }
