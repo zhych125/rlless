@@ -251,6 +251,42 @@ These targets guide our implementation decisions:
 4. **Measure performance** - Benchmark critical paths
 5. **Iterate and improve** - Refine based on actual usage
 
+## Async Trait Guidelines
+
+### Native vs async-trait Crate Decision
+- **Rust 1.75+** stabilized `async fn` in traits but with **critical limitation**: no dynamic dispatch (`dyn Trait` support)
+- **Our codebase uses `Box<dyn FileAccessor>`** for dependency injection
+- **Therefore: Continue using `async-trait` crate** for trait objects
+- **Use `Cow<str>` return types** instead of `String` to avoid unnecessary allocations
+
+### When to Use Each Approach
+```rust
+// ✅ Use async-trait crate when:
+// - Need dynamic dispatch (Box<dyn Trait>)  
+// - Support older Rust versions
+// - Complex lifetime scenarios
+
+#[async_trait]
+trait FileAccessor {
+    async fn read_line(&self, line_number: u64) -> Result<Cow<'_, str>>;
+}
+
+// ✅ Use native async fn when:
+// - Static dispatch only
+// - Simple lifetime requirements
+// - Rust 1.75+ minimum version
+
+trait SimpleService {
+    async fn process(&self, data: &str) -> String; // No dyn support
+}
+```
+
+### Memory Efficiency Rules
+- **Return `Cow<str>` instead of `String`** when possible
+- **Let caller decide**: `.as_ref()` for `&str`, `.into_owned()` for `String`
+- **InMemoryFileAccessor**: Use `Cow::Borrowed` for cached lines (zero allocation)
+- **Other accessors**: Use `Cow::Owned` when data must be constructed
+
 ## Questions to Ask Before Adding Complexity
 
 1. **Do we actually need this?** - Is it required for the MVP?

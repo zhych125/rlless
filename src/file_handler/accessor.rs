@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use async_trait::async_trait;
+use std::borrow::Cow;
 
 /// Information about a search match in the file
 #[derive(Debug, Clone)]
@@ -19,6 +20,7 @@ pub struct MatchInfo {
 
     /// Full content of the line containing the match
     /// Already converted to UTF-8 (lossy if needed)
+    /// Owned string since MatchInfo is typically consumed for highlighting/display
     pub line_content: String,
 
     /// Character position within the line where match starts
@@ -43,15 +45,17 @@ pub trait FileAccessor: Send + Sync {
     ///
     /// # Returns
     /// * The line content without trailing newline
+    /// * Uses Cow for zero-copy when data is cached, caller decides whether to clone
     /// * Error if line_number is out of bounds
     ///
     /// # Performance
-    /// * InMemory: O(1) - direct index lookup
+    /// * InMemory: O(1) - zero-copy for cached lines via Cow::Borrowed
     /// * Mmap: O(1) after indexing, may trigger lazy indexing on first access
     ///
     /// # Usage
     /// Used when user jumps to specific line or navigates with arrow keys
-    async fn read_line(&self, line_number: u64) -> Result<String>;
+    /// Use .as_ref() for &str, .into_owned() for String, .to_string() for guaranteed String
+    async fn read_line(&self, line_number: u64) -> Result<Cow<'_, str>>;
 
     /// Read multiple consecutive lines efficiently
     ///
@@ -62,14 +66,16 @@ pub trait FileAccessor: Send + Sync {
     /// # Returns
     /// * Vector of lines, may be shorter than `count` if EOF reached
     /// * Empty vector if `start` is beyond EOF
+    /// * Uses Cow for zero-copy when possible, caller decides when to allocate
     ///
     /// # Performance
+    /// * InMemory: O(1) per line - zero-copy for cached lines via Cow::Borrowed
     /// * Optimized for bulk reading (e.g., filling terminal screen)
-    /// * Uses bstr for efficient line iteration
     ///
     /// # Usage
     /// Used for initial screen fill, page up/down, showing context
-    async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<String>>;
+    /// Each Cow can be used with .as_ref() for &str or .into_owned() for String
+    async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<Cow<'_, str>>>;
 
     /// Find next occurrence of pattern searching forward from start_line
     ///
@@ -199,7 +205,7 @@ pub mod tests {
 
     #[async_trait]
     impl FileAccessor for MockFileAccessor {
-        async fn read_line(&self, line_number: u64) -> Result<String> {
+        async fn read_line(&self, line_number: u64) -> Result<Cow<'_, str>> {
             let line_idx = line_number as usize;
 
             if line_idx >= self.lines.len() {
@@ -213,10 +219,10 @@ pub mod tests {
                 ));
             }
 
-            Ok(self.lines[line_idx].clone())
+            Ok(Cow::Borrowed(&self.lines[line_idx]))
         }
 
-        async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<String>> {
+        async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<Cow<'_, str>>> {
             let start_idx = start as usize;
             let end_idx = (start_idx + count as usize).min(self.lines.len());
 
@@ -224,7 +230,10 @@ pub mod tests {
                 return Ok(Vec::new());
             }
 
-            Ok(self.lines[start_idx..end_idx].to_vec())
+            Ok(self.lines[start_idx..end_idx]
+                .iter()
+                .map(|s| Cow::Borrowed(s.as_str()))
+                .collect())
         }
 
         async fn find_next_match(
