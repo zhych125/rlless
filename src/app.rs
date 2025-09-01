@@ -19,11 +19,9 @@ impl Application {
     /// Create a new application instance
     pub async fn new(_file_path: PathBuf) -> Result<Self> {
         // TODO: Implement component initialization in Phase 2
-        Ok(Application {
-            _placeholder: (),
-        })
+        Ok(Application { _placeholder: () })
     }
-    
+
     /// Run the main application event loop
     pub async fn run(&mut self) -> Result<()> {
         // TODO: Implement main event loop in Phase 2

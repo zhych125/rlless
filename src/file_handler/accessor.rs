@@ -7,23 +7,142 @@
 use crate::error::Result;
 use async_trait::async_trait;
 
-/// Core trait for file access operations.
+/// Information about a search match in the file
+#[derive(Debug, Clone)]
+pub struct MatchInfo {
+    /// Line number where the match was found (0-based)
+    pub line_number: u64,
+
+    /// Byte offset from start of file where this line begins
+    /// Useful for seeking directly to this position
+    pub byte_offset: u64,
+
+    /// Full content of the line containing the match
+    /// Already converted to UTF-8 (lossy if needed)
+    pub line_content: String,
+
+    /// Character position within the line where match starts
+    /// Used for highlighting in UI
+    pub match_start: usize,
+
+    /// Character position within the line where match ends
+    /// Used for highlighting in UI
+    pub match_end: usize,
+}
+
+/// Core trait for file access operations
 ///
-/// This trait abstracts file access to enable different implementations
-/// (memory-mapped, streaming, compressed) while providing a consistent interface.
+/// This trait provides a unified interface for both small files (loaded into memory)
+/// and large files (memory-mapped). All implementations must be thread-safe.
 #[async_trait]
 pub trait FileAccessor: Send + Sync {
-    /// Read a range of bytes from the file
-    async fn read_range(&self, start: u64, length: usize) -> Result<Vec<u8>>;
-    
-    /// Read a specific line by line number (0-based)
+    /// Read a single line by line number
+    ///
+    /// # Arguments
+    /// * `line_number` - 0-based line number to read
+    ///
+    /// # Returns
+    /// * The line content without trailing newline
+    /// * Error if line_number is out of bounds
+    ///
+    /// # Performance
+    /// * InMemory: O(1) - direct index lookup
+    /// * Mmap: O(1) after indexing, may trigger lazy indexing on first access
+    ///
+    /// # Usage
+    /// Used when user jumps to specific line or navigates with arrow keys
     async fn read_line(&self, line_number: u64) -> Result<String>;
-    
+
+    /// Read multiple consecutive lines efficiently
+    ///
+    /// # Arguments
+    /// * `start` - First line number to read (0-based)
+    /// * `count` - Number of lines to read
+    ///
+    /// # Returns
+    /// * Vector of lines, may be shorter than `count` if EOF reached
+    /// * Empty vector if `start` is beyond EOF
+    ///
+    /// # Performance
+    /// * Optimized for bulk reading (e.g., filling terminal screen)
+    /// * Uses bstr for efficient line iteration
+    ///
+    /// # Usage
+    /// Used for initial screen fill, page up/down, showing context
+    async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<String>>;
+
+    /// Find next occurrence of pattern searching forward from start_line
+    ///
+    /// # Arguments
+    /// * `start_line` - Line number to start searching from (inclusive)
+    /// * `pattern` - String pattern to search for (substring match)
+    ///
+    /// # Returns
+    /// * Some(MatchInfo) if pattern found
+    /// * None if pattern not found before EOF
+    ///
+    /// # Performance
+    /// * Searches incrementally, returns as soon as match found
+    /// * Does not scan entire file
+    ///
+    /// # Usage
+    /// Used for 'n' (next) command in search, Find Next in UI
+    async fn find_next_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>>;
+
+    /// Find previous occurrence of pattern searching backward from start_line
+    ///
+    /// # Arguments
+    /// * `start_line` - Line number to start searching from (exclusive)
+    /// * `pattern` - String pattern to search for (substring match)
+    ///
+    /// # Returns
+    /// * Some(MatchInfo) if pattern found
+    /// * None if pattern not found before beginning of file
+    ///
+    /// # Performance
+    /// * Searches incrementally backward
+    /// * May be slower than forward search due to access patterns
+    ///
+    /// # Usage
+    /// Used for 'N' (previous) command in search, Find Previous in UI
+    async fn find_prev_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>>;
+
     /// Get the total file size in bytes
+    ///
+    /// # Returns
+    /// * File size in bytes
+    ///
+    /// # Performance
+    /// * O(1) - cached from file metadata
+    ///
+    /// # Usage
+    /// Used for progress indicators, statistics display
     fn file_size(&self) -> u64;
-    
-    /// Get the total number of lines in the file (if available)
+
+    /// Get total number of lines in file if known
+    ///
+    /// # Returns
+    /// * Some(count) if line count is known
+    /// * None if not yet computed (large files with lazy indexing)
+    ///
+    /// # Performance
+    /// * InMemory: Always returns Some (computed at load time)
+    /// * Mmap: Returns None initially, Some after sufficient indexing
+    ///
+    /// # Usage
+    /// Used for scroll bar positioning, jump to percentage, statistics
     fn total_lines(&self) -> Option<u64>;
+
+    /// Check if this implementation supports parallel operations
+    ///
+    /// # Returns
+    /// * true if parallel operations are available
+    ///
+    /// # Usage
+    /// Used to determine if ParallelFileProcessor trait is available
+    fn supports_parallel(&self) -> bool {
+        false // Default: no parallel support
+    }
 }
 
 /// Access strategy for different file handling approaches
@@ -43,7 +162,7 @@ pub mod tests {
     use crate::error::RllessError;
 
     /// Mock implementation of FileAccessor for testing
-    /// 
+    ///
     /// This implementation stores content in memory and simulates file operations
     /// without requiring actual file I/O, making tests fast and reliable.
     #[derive(Debug)]
@@ -80,29 +199,76 @@ pub mod tests {
 
     #[async_trait]
     impl FileAccessor for MockFileAccessor {
-        async fn read_range(&self, start: u64, length: usize) -> Result<Vec<u8>> {
-            let start = start as usize;
-            let end = (start + length).min(self.content.len());
-            
-            if start >= self.content.len() {
-                return Ok(Vec::new());
-            }
-            
-            Ok(self.content[start..end].as_bytes().to_vec())
-        }
-
         async fn read_line(&self, line_number: u64) -> Result<String> {
             let line_idx = line_number as usize;
-            
+
             if line_idx >= self.lines.len() {
                 return Err(RllessError::file_error(
-                    &format!("Line number {} out of bounds (total lines: {})", 
-                        line_number, self.lines.len()),
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "Line out of bounds")
+                    &format!(
+                        "Line number {} out of bounds (total lines: {})",
+                        line_number,
+                        self.lines.len()
+                    ),
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "Line out of bounds"),
                 ));
             }
-            
+
             Ok(self.lines[line_idx].clone())
+        }
+
+        async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<String>> {
+            let start_idx = start as usize;
+            let end_idx = (start_idx + count as usize).min(self.lines.len());
+
+            if start_idx >= self.lines.len() {
+                return Ok(Vec::new());
+            }
+
+            Ok(self.lines[start_idx..end_idx].to_vec())
+        }
+
+        async fn find_next_match(
+            &self,
+            start_line: u64,
+            pattern: &str,
+        ) -> Result<Option<MatchInfo>> {
+            for (i, line) in self.lines.iter().enumerate().skip(start_line as usize) {
+                if let Some(match_start) = line.find(pattern) {
+                    return Ok(Some(MatchInfo {
+                        line_number: i as u64,
+                        byte_offset: 0, // Mock doesn't track byte offsets
+                        line_content: line.clone(),
+                        match_start,
+                        match_end: match_start + pattern.len(),
+                    }));
+                }
+            }
+            Ok(None)
+        }
+
+        async fn find_prev_match(
+            &self,
+            start_line: u64,
+            pattern: &str,
+        ) -> Result<Option<MatchInfo>> {
+            if start_line == 0 {
+                return Ok(None);
+            }
+
+            for i in (0..start_line as usize).rev() {
+                if let Some(line) = self.lines.get(i) {
+                    if let Some(match_start) = line.find(pattern) {
+                        return Ok(Some(MatchInfo {
+                            line_number: i as u64,
+                            byte_offset: 0, // Mock doesn't track byte offsets
+                            line_content: line.clone(),
+                            match_start,
+                            match_end: match_start + pattern.len(),
+                        }));
+                    }
+                }
+            }
+            Ok(None)
         }
 
         fn file_size(&self) -> u64 {
@@ -123,50 +289,53 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_accessor_read_range() {
-        let content = "Hello, World!\nSecond line\nThird line\n";
-        let accessor = MockFileAccessor::new(content);
-        
+    async fn test_mock_accessor_read_lines_range() {
+        let lines = vec![
+            "First line".to_string(),
+            "Second line".to_string(),
+            "Third line".to_string(),
+        ];
+        let accessor = MockFileAccessor::from_lines(lines.clone());
+
         // Test reading from the beginning
-        let range = accessor.read_range(0, 5).await.unwrap();
-        assert_eq!(String::from_utf8(range).unwrap(), "Hello");
-        
+        let range = accessor.read_lines_range(0, 2).await.unwrap();
+        assert_eq!(range, vec!["First line", "Second line"]);
+
         // Test reading from the middle
-        let range = accessor.read_range(7, 5).await.unwrap();
-        assert_eq!(String::from_utf8(range).unwrap(), "World");
-        
+        let range = accessor.read_lines_range(1, 2).await.unwrap();
+        assert_eq!(range, vec!["Second line", "Third line"]);
+
         // Test reading beyond end
-        let range = accessor.read_range(100, 10).await.unwrap();
+        let range = accessor.read_lines_range(10, 5).await.unwrap();
         assert!(range.is_empty());
-        
+
         // Test reading partial range at end
-        let content_len = content.len() as u64;
-        let range = accessor.read_range(content_len - 3, 10).await.unwrap();
-        assert_eq!(String::from_utf8(range).unwrap(), "ne\n");
+        let range = accessor.read_lines_range(2, 5).await.unwrap();
+        assert_eq!(range, vec!["Third line"]);
     }
 
     #[tokio::test]
     async fn test_mock_accessor_read_line() {
         let lines = vec![
             "First line".to_string(),
-            "Second line".to_string(), 
+            "Second line".to_string(),
             "Third line".to_string(),
         ];
         let accessor = MockFileAccessor::from_lines(lines.clone());
-        
+
         // Test reading valid lines
         for (i, expected_line) in lines.iter().enumerate() {
             let result = accessor.read_line(i as u64).await.unwrap();
             assert_eq!(result, *expected_line);
         }
-        
+
         // Test reading out of bounds
         let result = accessor.read_line(10).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             RllessError::FileError { message, .. } => {
                 assert!(message.contains("out of bounds"));
-            },
+            }
             _ => panic!("Expected FileError for line out of bounds"),
         }
     }
@@ -175,7 +344,7 @@ pub mod tests {
     async fn test_mock_accessor_file_size_and_lines() {
         let content = "Line 1\nLine 2\nLine 3\n";
         let accessor = MockFileAccessor::new(content);
-        
+
         assert_eq!(accessor.file_size(), content.len() as u64);
         assert_eq!(accessor.total_lines(), Some(3));
     }
@@ -183,14 +352,14 @@ pub mod tests {
     #[tokio::test]
     async fn test_mock_accessor_empty_content() {
         let accessor = MockFileAccessor::new("");
-        
+
         assert_eq!(accessor.file_size(), 0);
         assert_eq!(accessor.total_lines(), Some(0));
-        
+
         // Reading from empty content should return empty results
-        let range = accessor.read_range(0, 10).await.unwrap();
+        let range = accessor.read_lines_range(0, 10).await.unwrap();
         assert!(range.is_empty());
-        
+
         let result = accessor.read_line(0).await;
         assert!(result.is_err());
     }
@@ -198,13 +367,70 @@ pub mod tests {
     #[tokio::test]
     async fn test_mock_accessor_single_line() {
         let accessor = MockFileAccessor::new("Single line without newline");
-        
+
         let line = accessor.read_line(0).await.unwrap();
         assert_eq!(line, "Single line without newline");
         assert_eq!(accessor.total_lines(), Some(1));
-        
+
         // Second line should fail
         let result = accessor.read_line(1).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_accessor_find_next_match() {
+        let lines = vec![
+            "First line with pattern".to_string(),
+            "Second line".to_string(),
+            "Third line with pattern again".to_string(),
+        ];
+        let accessor = MockFileAccessor::from_lines(lines);
+
+        // Test finding from beginning
+        let result = accessor.find_next_match(0, "pattern").await.unwrap();
+        assert!(result.is_some());
+        let match_info = result.unwrap();
+        assert_eq!(match_info.line_number, 0);
+        assert_eq!(match_info.line_content, "First line with pattern");
+        assert_eq!(match_info.match_start, 16);
+        assert_eq!(match_info.match_end, 23);
+
+        // Test finding from middle
+        let result = accessor.find_next_match(1, "pattern").await.unwrap();
+        assert!(result.is_some());
+        let match_info = result.unwrap();
+        assert_eq!(match_info.line_number, 2);
+        assert_eq!(match_info.line_content, "Third line with pattern again");
+
+        // Test not found
+        let result = accessor.find_next_match(0, "nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mock_accessor_find_prev_match() {
+        let lines = vec![
+            "First line with pattern".to_string(),
+            "Second line".to_string(),
+            "Third line with pattern again".to_string(),
+        ];
+        let accessor = MockFileAccessor::from_lines(lines);
+
+        // Test finding backward from end
+        let result = accessor.find_prev_match(3, "pattern").await.unwrap();
+        assert!(result.is_some());
+        let match_info = result.unwrap();
+        assert_eq!(match_info.line_number, 2);
+        assert_eq!(match_info.line_content, "Third line with pattern again");
+
+        // Test finding backward from middle
+        let result = accessor.find_prev_match(2, "pattern").await.unwrap();
+        assert!(result.is_some());
+        let match_info = result.unwrap();
+        assert_eq!(match_info.line_number, 0);
+
+        // Test not found from beginning
+        let result = accessor.find_prev_match(0, "pattern").await.unwrap();
+        assert!(result.is_none());
     }
 }

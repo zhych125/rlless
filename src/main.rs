@@ -17,27 +17,28 @@ async fn main() -> Result<()> {
         .about("A high-performance terminal log viewer for large files")
         .long_about(
             "rlless is a terminal-based log viewer that can handle extremely large files \
-             (40GB+) with SIMD-optimized search and memory-efficient streaming."
+             (40GB+) with SIMD-optimized search and memory-efficient streaming.",
         )
         .arg(
             Arg::new("file")
                 .help("Path to the log file to view")
                 .required(true)
-                .index(1)
+                .index(1),
         )
         .arg(
             Arg::new("version")
                 .short('V')
                 .long("version")
                 .help("Print version information")
-                .action(clap::ArgAction::Version)
+                .action(clap::ArgAction::Version),
         )
         .get_matches();
 
     // Get the file path argument
     let file_path = PathBuf::from(
-        matches.get_one::<String>("file")
-            .expect("file argument is required")
+        matches
+            .get_one::<String>("file")
+            .expect("file argument is required"),
     );
 
     // Validate file exists
@@ -50,15 +51,21 @@ async fn main() -> Result<()> {
     }
 
     // For now, just print basic file information (MVP foundation)
-    println!("rlless {} - Processing file: {}", rlless::VERSION, file_path.display());
-    
+    println!(
+        "rlless {} - Processing file: {}",
+        rlless::VERSION,
+        file_path.display()
+    );
+
     // Basic file info
     let metadata = file_path.metadata()?;
     let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
     println!("File size: {:.2} MB", size_mb);
-    
+
     // TODO: In Phase 2, this will initialize the Application and start the main event loop
-    println!("Foundation established. Core functionality will be implemented in subsequent phases.");
+    println!(
+        "Foundation established. Core functionality will be implemented in subsequent phases."
+    );
 
     Ok(())
 }

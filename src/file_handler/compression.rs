@@ -37,18 +37,19 @@ pub enum CompressionType {
 pub fn detect_compression(path: &Path) -> Result<CompressionType> {
     let file = File::open(path)
         .map_err(|e| RllessError::file_error("Failed to open file for compression detection", e))?;
-    
+
     let mut reader = BufReader::new(file);
     let mut buffer = [0u8; 8]; // Enough for longest magic number (XZ needs 6 bytes)
-    
-    let bytes_read = reader.read(&mut buffer)
+
+    let bytes_read = reader
+        .read(&mut buffer)
         .map_err(|e| RllessError::file_error("Failed to read file header", e))?;
-    
+
     // Handle empty or very small files
     if bytes_read < 2 {
         return Ok(CompressionType::None);
     }
-    
+
     // Check magic numbers in order of common usage and performance
     if buffer.starts_with(&[0x1f, 0x8b]) {
         // Gzip magic number (RFC 1952)
@@ -74,7 +75,8 @@ mod tests {
     /// Create a test file with specific content
     fn create_test_file(content: &[u8]) -> NamedTempFile {
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
-        file.write_all(content).expect("Failed to write test content");
+        file.write_all(content)
+            .expect("Failed to write test content");
         file.flush().expect("Failed to flush test file");
         file
     }
@@ -84,7 +86,7 @@ mod tests {
         // Gzip magic number: 1f 8b
         let gzip_header = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
         let test_file = create_test_file(&gzip_header);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::Gzip);
     }
@@ -94,7 +96,7 @@ mod tests {
         // Bzip2 magic number: "BZh" (42 5a 68)
         let bzip2_header = [0x42, 0x5a, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26];
         let test_file = create_test_file(&bzip2_header);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::Bzip2);
     }
@@ -104,7 +106,7 @@ mod tests {
         // XZ magic number: fd 37 7a 58 5a 00
         let xz_header = [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00, 0x01];
         let test_file = create_test_file(&xz_header);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::Xz);
     }
@@ -114,7 +116,7 @@ mod tests {
         // Plain text file
         let plain_content = b"This is just plain text content\nwith multiple lines\n";
         let test_file = create_test_file(plain_content);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::None);
     }
@@ -123,7 +125,7 @@ mod tests {
     fn test_detect_empty_file() {
         // Empty file should be detected as no compression
         let test_file = create_test_file(&[]);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::None);
     }
@@ -132,7 +134,7 @@ mod tests {
     fn test_detect_single_byte_file() {
         // Single byte file should be detected as no compression
         let test_file = create_test_file(&[0x42]);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::None);
     }
@@ -142,7 +144,7 @@ mod tests {
         // File that starts with partial gzip magic (only first byte)
         let partial_header = [0x1f, 0x00, 0x00, 0x00];
         let test_file = create_test_file(&partial_header);
-        
+
         let result = detect_compression(test_file.path()).unwrap();
         assert_eq!(result, CompressionType::None);
     }
@@ -150,14 +152,14 @@ mod tests {
     #[test]
     fn test_detect_compression_file_not_found() {
         use std::path::PathBuf;
-        
+
         let non_existent_path = PathBuf::from("/this/file/does/not/exist");
         let result = detect_compression(&non_existent_path);
-        
+
         assert!(result.is_err());
         // Should be a file error
         match result.unwrap_err() {
-            RllessError::FileError { .. } => {}, // Expected
+            RllessError::FileError { .. } => {} // Expected
             _ => panic!("Expected FileError for non-existent file"),
         }
     }
@@ -176,7 +178,7 @@ mod tests {
         // Test that equality works
         assert_eq!(CompressionType::Gzip, CompressionType::Gzip);
         assert_ne!(CompressionType::Gzip, CompressionType::Bzip2);
-        
+
         // Test that copy works
         let compression = CompressionType::Xz;
         let copied = compression;

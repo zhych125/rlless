@@ -1,6 +1,6 @@
 //! # rlless - High-Performance Terminal Log Viewer
-//! 
-//! A fast, memory-efficient terminal log viewer designed to handle extremely large files 
+//!
+//! A fast, memory-efficient terminal log viewer designed to handle extremely large files
 //! (40GB+) with SIMD-optimized search capabilities powered by ripgrep.
 //!
 //! ## Features
@@ -26,16 +26,16 @@ pub mod error;
 pub mod file_handler;
 
 // Core components - Phase 2 implementation
+pub mod app;
 pub mod search;
 pub mod ui;
-pub mod app;
 
 // Re-export commonly used types for convenience
 pub use error::{Result, RllessError};
 
 // Public API surface for external usage
 pub use app::Application;
-pub use file_handler::{FileAccessor, CompressionType};
+pub use file_handler::{CompressionType, FileAccessor};
 
 // Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

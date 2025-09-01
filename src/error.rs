@@ -151,34 +151,40 @@ mod tests {
     #[test]
     fn test_error_display_messages() {
         let path = PathBuf::from("/test/file.log");
-        
+
         let file_not_found = RllessError::FileNotFound { path: path.clone() };
         assert_eq!(file_not_found.to_string(), "File not found: /test/file.log");
-        
+
         let not_a_file = RllessError::NotAFile { path: path.clone() };
-        assert_eq!(not_a_file.to_string(), "Path is not a regular file: /test/file.log");
-        
+        assert_eq!(
+            not_a_file.to_string(),
+            "Path is not a regular file: /test/file.log"
+        );
+
         let memory_error = RllessError::memory_mapping("Failed to map file");
-        assert_eq!(memory_error.to_string(), "Memory mapping failed: Failed to map file");
+        assert_eq!(
+            memory_error.to_string(),
+            "Memory mapping failed: Failed to map file"
+        );
     }
-    
+
     #[test]
     fn test_error_constructors() {
         let search_err = RllessError::search("Pattern not found");
         matches!(search_err, RllessError::SearchError { .. });
-        
+
         let ui_err = RllessError::ui("Terminal resize failed");
         matches!(ui_err, RllessError::UIError { .. });
-        
+
         let other_err = RllessError::other("Unknown error");
         matches!(other_err, RllessError::Other { .. });
     }
-    
+
     #[test]
     fn test_io_error_conversion() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found");
         let rlless_err: RllessError = io_err.into();
-        
+
         match rlless_err {
             RllessError::FileError { message, .. } => {
                 assert_eq!(message, "File not found");
@@ -186,13 +192,13 @@ mod tests {
             _ => panic!("Expected FileError variant"),
         }
     }
-    
+
     #[test]
     fn test_result_type_alias() {
         fn returns_result() -> Result<String> {
             Ok("success".to_string())
         }
-        
+
         let result = returns_result();
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "success");
