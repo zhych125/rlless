@@ -240,9 +240,9 @@ impl FileAccessor for MmapFileAccessor {
     }
 
     fn supports_parallel(&self) -> bool {
-        // Memory mapping enables efficient parallel access
-        // Multiple threads can read different regions simultaneously
-        true
+        // Currently not implemented - would require careful design around
+        // shared LineIndex updates and thread-safe line range caching
+        false
     }
 }
 

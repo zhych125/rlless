@@ -243,6 +243,19 @@ These targets guide our implementation decisions:
 - **Navigation**: <50ms response time
 - **Startup**: <100ms from CLI to interactive
 
+## Future Optimizations (Not Yet Implemented)
+
+These optimizations should be considered only after measuring actual performance bottlenecks:
+
+### MmapFileAccessor Line Range Caching
+- **Problem**: Repeated LineIndex lookups for recently accessed lines
+- **Solution**: Add LRU cache for line ranges `(start_byte, end_byte)`
+- **Challenge**: LruCache requires `&mut self` for both get/put operations (no internal mutability)
+- **Options**: 
+  - `Mutex<LruCache>` (honest about exclusive locking)
+  - Concurrent cache like `moka` or `quick_cache` (true internal mutability)
+- **Decision**: Defer until profiling shows LineIndex lookups are a bottleneck
+
 ## Development Workflow
 
 1. **Start with traits** - Define interfaces before implementations
