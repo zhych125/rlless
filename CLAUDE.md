@@ -256,6 +256,23 @@ These optimizations should be considered only after measuring actual performance
   - Concurrent cache like `moka` or `quick_cache` (true internal mutability)
 - **Decision**: Defer until profiling shows LineIndex lookups are a bottleneck
 
+### Pipe/Stdin Support (Lower Priority)
+- **Problem**: Current architecture only supports file paths, not piped input like `cat file | rlless`
+- **Solution**: Add `PipeFileAccessor` to handle stdin input with smart buffering
+- **Strategy**:
+  - Small pipes (< 50MB): Use `InMemoryFileAccessor` directly
+  - Large pipes (≥ 50MB): Spill to temporary file, then use `MmapFileAccessor`
+- **Implementation**:
+  ```rust
+  pub enum PipeFileAccessor {
+      InMemory(InMemoryFileAccessor),
+      Spilled { temp_file: NamedTempFile, accessor: MmapFileAccessor }
+  }
+  ```
+- **CLI Integration**: `FileAccessorFactory::create_from_path_or_stdin(path: Option<&Path>)`
+- **Benefits**: Enables standard Unix pipe workflows while maintaining performance
+- **Decision**: Implement after Phase 2 core components are complete
+
 ## Development Workflow
 
 1. **Start with traits** - Define interfaces before implementations
