@@ -50,10 +50,14 @@ impl LineIndex {
     /// * Only scans the portion of file not yet indexed
     /// * O(n) where n is bytes to scan, but only runs once per file region
     pub fn ensure_indexed_to(&mut self, data: &[u8], target_line: u64) {
-        let current_lines = (self.line_offsets.len() - 1) as u64;
+        // Special case: empty data means no lines exist
+        if data.is_empty() {
+            return;
+        }
 
-        if target_line <= current_lines {
-            return; // Already indexed enough lines
+        // If we have already indexed enough lines, return early
+        if target_line < self.indexed_line_count() {
+            return;
         }
 
         let mut pos = self.indexed_to_byte as usize;
@@ -125,26 +129,31 @@ impl LineIndex {
     /// # Returns
     /// * Number of lines that have known positions
     pub fn indexed_line_count(&self) -> u64 {
+        // If we haven't processed any content yet, there are no lines
+        if self.indexed_to_byte == 0 {
+            return 0;
+        }
+
+        // line_offsets.len() is always >= 1 (initialized with [0])
+        // but let's be defensive and handle the empty case
+        if self.line_offsets.is_empty() {
+            return 0;
+        }
+
         let newline_count = (self.line_offsets.len() - 1) as u64;
 
         // If we have indexed some content beyond the last newline, that's another line
-        // But only if we've actually processed some content (indexed_to_byte > 0)
-        if self.indexed_to_byte > 0 {
-            if self.line_offsets.len() <= 1 {
-                // No newlines found, but we have content, so that's 1 line
-                1
-            } else {
-                // Check if there's content after the last newline
-                let last_newline_pos = *self.line_offsets.last().unwrap();
-                if self.indexed_to_byte > last_newline_pos {
-                    newline_count + 1
-                } else {
-                    newline_count
-                }
-            }
+        if self.line_offsets.len() <= 1 {
+            // No newlines found, but we have content, so that's 1 line
+            1
         } else {
-            // No content processed yet
-            0
+            // Check if there's content after the last newline
+            let last_newline_pos = *self.line_offsets.last().unwrap();
+            if self.indexed_to_byte > last_newline_pos {
+                newline_count + 1
+            } else {
+                newline_count
+            }
         }
     }
 
@@ -277,14 +286,15 @@ mod tests {
         let mut index = LineIndex::new();
         let data = b"single line without newline".to_vec();
 
-        // Requesting line 0 doesn't require processing since line 0 always exists
+        // Requesting line 0 with non-empty data should process content to establish line 0 exists
         index.ensure_indexed_to(&data, 0);
-        assert_eq!(index.indexed_line_count(), 0); // No content processed yet
+        assert_eq!(index.indexed_line_count(), 1); // One line found (content exists, no newlines)
+        assert_eq!(index.indexed_byte_count(), data.len() as u64); // Entire file processed
 
-        // Now request a line beyond what exists - this will cause processing
+        // Requesting line 1 should not find more lines
         index.ensure_indexed_to(&data, 1);
-        assert_eq!(index.indexed_byte_count(), data.len() as u64); // Now it processes the entire file
-        assert_eq!(index.indexed_line_count(), 1); // One line found (no newlines, but content exists)
+        assert_eq!(index.indexed_line_count(), 1); // Still only one line
+        assert_eq!(index.indexed_byte_count(), data.len() as u64); // Still entire file processed
     }
 
     #[test]

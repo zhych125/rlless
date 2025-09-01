@@ -45,11 +45,11 @@ pub trait FileAccessor: Send + Sync {
     ///
     /// # Returns
     /// * The line content without trailing newline
-    /// * Uses Cow for zero-copy when data is cached, caller decides whether to clone
+    /// * Uses Cow for zero-copy when possible, caller decides whether to clone
     /// * Error if line_number is out of bounds
     ///
     /// # Performance
-    /// * InMemory: O(1) - zero-copy for cached lines via Cow::Borrowed
+    /// * InMemory: O(1) - zero-copy via Cow::Borrowed
     /// * Mmap: O(1) after indexing, may trigger lazy indexing on first access
     ///
     /// # Usage
@@ -69,7 +69,7 @@ pub trait FileAccessor: Send + Sync {
     /// * Uses Cow for zero-copy when possible, caller decides when to allocate
     ///
     /// # Performance
-    /// * InMemory: O(1) per line - zero-copy for cached lines via Cow::Borrowed
+    /// * InMemory: O(1) per line - zero-copy via Cow::Borrowed
     /// * Optimized for bulk reading (e.g., filling terminal screen)
     ///
     /// # Usage
@@ -173,7 +173,6 @@ pub mod tests {
     /// without requiring actual file I/O, making tests fast and reliable.
     #[derive(Debug)]
     pub struct MockFileAccessor {
-        content: String,
         lines: Vec<String>,
         file_size: u64,
     }
@@ -185,11 +184,7 @@ pub mod tests {
             let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
             let file_size = content.len() as u64;
 
-            Self {
-                content,
-                lines,
-                file_size,
-            }
+            Self { lines, file_size }
         }
 
         /// Create a mock accessor with specific lines
