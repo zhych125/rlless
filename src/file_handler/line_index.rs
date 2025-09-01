@@ -1,37 +1,17 @@
-//! SIMD-optimized line boundary finder with intelligent caching
+//! SIMD-optimized line boundary detection
 //!
 //! This module provides the LineIndex structure that maintains an index of line boundaries
 //! in a file, building the index lazily as lines are accessed. It uses memchr for
-//! SIMD-optimized newline detection and includes an LRU cache for frequently accessed lines.
+//! SIMD-optimized newline detection without any string caching overhead.
 
-use lru::LruCache;
 use memchr::memchr;
-use std::num::NonZeroUsize;
 
-/// Cached line information
-#[derive(Debug, Clone)]
-struct CachedLine {
-    /// Line number (0-based) for cache lookup
-    line_number: u64,
-
-    /// Cached line content (UTF-8 converted)
-    /// Stored to avoid repeated UTF-8 conversion
-    content: String,
-
-    /// Byte position where this line starts in file
-    /// Used for chunk operations
-    byte_start: u64,
-
-    /// Byte position where this line ends (before newline)
-    /// Used for chunk operations
-    byte_end: u64,
-}
-
-/// SIMD-optimized line boundary finder with intelligent caching
+/// SIMD-optimized line boundary finder
 ///
 /// This structure maintains an index of line boundaries in a file,
 /// building the index lazily as lines are accessed. It uses memchr
-/// for SIMD-optimized newline detection.
+/// for SIMD-optimized newline detection and provides zero-copy access
+/// to line data via byte offsets.
 #[derive(Debug)]
 pub struct LineIndex {
     /// Byte offsets where each line starts
@@ -48,12 +28,6 @@ pub struct LineIndex {
     /// Everything before this position has been scanned for newlines.
     /// Used to resume indexing from where we left off.
     indexed_to_byte: u64,
-
-    /// O(1) LRU cache for line content
-    ///
-    /// Uses the `lru` crate for efficient O(1) get/put operations.
-    /// Automatically evicts least recently used lines when full.
-    line_cache: LruCache<u64, CachedLine>,
 }
 
 impl LineIndex {
@@ -62,16 +36,6 @@ impl LineIndex {
         Self {
             line_offsets: vec![0], // First line starts at position 0
             indexed_to_byte: 0,
-            line_cache: LruCache::new(NonZeroUsize::new(100).unwrap()),
-        }
-    }
-
-    /// Create with custom cache size
-    pub fn with_cache_size(max_cache_size: usize) -> Self {
-        Self {
-            line_offsets: vec![0],
-            indexed_to_byte: 0,
-            line_cache: LruCache::new(NonZeroUsize::new(max_cache_size).unwrap()),
         }
     }
 
@@ -101,7 +65,7 @@ impl LineIndex {
                 self.line_offsets.push(pos as u64);
 
                 // Check if we've indexed enough
-                if self.line_offsets.len() > target_line as usize + 1 {
+                if target_line != u64::MAX && (self.line_offsets.len() - 1) as u64 > target_line {
                     break;
                 }
             } else {
@@ -114,44 +78,35 @@ impl LineIndex {
         self.indexed_to_byte = pos as u64;
     }
 
-    /// Get a line from cache if available
-    ///
-    /// # Returns
-    /// * Some(content) if line is cached
-    /// * None if line is not in cache
-    ///
-    /// # Side Effects
-    /// * Does not update LRU ordering (uses peek for read-only access)
-    pub fn get_cached_line(&self, line_number: u64) -> Option<&str> {
-        self.line_cache
-            .peek(&line_number)
-            .map(|cached| cached.content.as_str())
-    }
-
-    /// Add a line to the cache
+    /// Get line byte range (start, end) for a specific line number
     ///
     /// # Arguments
-    /// * `line_number` - Line number to cache
-    /// * `content` - Line content (already UTF-8 converted)
-    /// * `byte_start` - Where this line starts in the file
-    /// * `byte_end` - Where this line ends in the file
+    /// * `line_number` - The line number to get bounds for (0-based)
     ///
-    /// # Side Effects
-    /// * Automatically handles LRU eviction (handled by lru crate)
-    pub fn cache_line(
-        &mut self,
-        line_number: u64,
-        content: String,
-        byte_start: u64,
-        byte_end: u64,
-    ) {
-        let cached_line = CachedLine {
-            line_number,
-            content,
-            byte_start,
-            byte_end,
+    /// # Returns
+    /// * Some((start_byte, end_byte)) if line exists
+    /// * None if line_number is beyond indexed content
+    ///
+    /// # Usage
+    /// Used for zero-copy line extraction from file data
+    pub fn get_line_range(&self, line_number: u64) -> Option<(u64, u64)> {
+        let line_idx = line_number as usize;
+
+        // Check if this line number exists
+        if line_number >= self.indexed_line_count() {
+            return None; // Line not indexed yet
+        }
+
+        let start = self.line_offsets[line_idx];
+        let end = if line_idx + 1 < self.line_offsets.len() {
+            // Not the last line - end is just before next line's newline
+            self.line_offsets[line_idx + 1].saturating_sub(1)
+        } else {
+            // Last indexed line - end is current indexed position
+            self.indexed_to_byte
         };
-        self.line_cache.put(line_number, cached_line);
+
+        Some((start, end))
     }
 
     /// Get line start positions for a range
@@ -170,7 +125,27 @@ impl LineIndex {
     /// # Returns
     /// * Number of lines that have known positions
     pub fn indexed_line_count(&self) -> u64 {
-        (self.line_offsets.len() - 1) as u64
+        let newline_count = (self.line_offsets.len() - 1) as u64;
+
+        // If we have indexed some content beyond the last newline, that's another line
+        // But only if we've actually processed some content (indexed_to_byte > 0)
+        if self.indexed_to_byte > 0 {
+            if self.line_offsets.len() <= 1 {
+                // No newlines found, but we have content, so that's 1 line
+                1
+            } else {
+                // Check if there's content after the last newline
+                let last_newline_pos = *self.line_offsets.last().unwrap();
+                if self.indexed_to_byte > last_newline_pos {
+                    newline_count + 1
+                } else {
+                    newline_count
+                }
+            }
+        } else {
+            // No content processed yet
+            0
+        }
     }
 
     /// Check how many bytes have been indexed
@@ -208,14 +183,6 @@ mod tests {
         assert_eq!(index.line_offsets, vec![0]);
         assert_eq!(index.indexed_to_byte, 0);
         assert_eq!(index.indexed_line_count(), 0);
-        assert_eq!(index.line_cache.cap().get(), 100);
-    }
-
-    #[test]
-    fn test_custom_cache_size() {
-        let index = LineIndex::with_cache_size(50);
-        // The lru crate doesn't expose capacity, but we can verify it works
-        assert_eq!(index.line_cache.cap().get(), 50);
     }
 
     #[test]
@@ -256,59 +223,24 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_operations() {
-        let mut index = LineIndex::with_cache_size(3);
+    fn test_get_line_range() {
+        let mut index = LineIndex::new();
+        let data = create_test_data(); // "line1\nline2\nline3\nline4\n"
 
-        // Add lines to cache
-        index.cache_line(0, "line1".to_string(), 0, 5);
-        index.cache_line(1, "line2".to_string(), 6, 11);
-        index.cache_line(2, "line3".to_string(), 12, 17);
+        // Index some lines
+        index.ensure_indexed_to(&data, 2);
 
-        assert_eq!(index.line_cache.len(), 3);
+        // Test first line
+        let range = index.get_line_range(0);
+        assert_eq!(range, Some((0, 5))); // "line1" without newline
 
-        // Test cache hit
-        let result = index.get_cached_line(1);
-        assert_eq!(result, Some("line2"));
+        // Test second line
+        let range = index.get_line_range(1);
+        assert_eq!(range, Some((6, 11))); // "line2" without newline
 
-        // Test cache miss
-        let result = index.get_cached_line(99);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_cache_eviction() {
-        let mut index = LineIndex::with_cache_size(2);
-
-        // Fill cache to capacity
-        index.cache_line(0, "line0".to_string(), 0, 5);
-        index.cache_line(1, "line1".to_string(), 6, 11);
-        assert_eq!(index.line_cache.len(), 2);
-
-        // Add one more - should evict least recently used
-        index.cache_line(2, "line2".to_string(), 12, 17);
-        assert_eq!(index.line_cache.len(), 2);
-
-        // line0 should be evicted, line1 and line2 should remain
-        assert!(index.get_cached_line(0).is_none());
-        assert!(index.get_cached_line(1).is_some());
-        assert!(index.get_cached_line(2).is_some());
-    }
-
-    #[test]
-    fn test_cache_duplicate_handling() {
-        let mut index = LineIndex::with_cache_size(3);
-
-        // Add a line
-        index.cache_line(0, "line0".to_string(), 0, 5);
-        assert_eq!(index.line_cache.len(), 1);
-
-        // Add the same line again with different content
-        index.cache_line(0, "updated line0".to_string(), 0, 5);
-        assert_eq!(index.line_cache.len(), 1);
-
-        // Should have the updated content
-        let result = index.get_cached_line(0);
-        assert_eq!(result, Some("updated line0"));
+        // Test non-existent line
+        let range = index.get_line_range(99);
+        assert_eq!(range, None);
     }
 
     #[test]
@@ -347,12 +279,12 @@ mod tests {
 
         // Requesting line 0 doesn't require processing since line 0 always exists
         index.ensure_indexed_to(&data, 0);
-        assert_eq!(index.indexed_line_count(), 0); // Still no indexed lines beyond the initial state
+        assert_eq!(index.indexed_line_count(), 0); // No content processed yet
 
         // Now request a line beyond what exists - this will cause processing
         index.ensure_indexed_to(&data, 1);
         assert_eq!(index.indexed_byte_count(), data.len() as u64); // Now it processes the entire file
-        assert_eq!(index.indexed_line_count(), 0); // Still no newlines found
+        assert_eq!(index.indexed_line_count(), 1); // One line found (no newlines, but content exists)
     }
 
     #[test]
@@ -393,6 +325,6 @@ mod tests {
     fn test_default_implementation() {
         let index = LineIndex::default();
         assert_eq!(index.line_offsets, vec![0]);
-        assert_eq!(index.line_cache.cap().get(), 100);
+        assert_eq!(index.indexed_to_byte, 0);
     }
 }
