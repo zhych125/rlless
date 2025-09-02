@@ -335,43 +335,58 @@ trait SimpleService {
 
 Remember: **Simple, working code is better than complex, clever code.**
 
-## Phase 1 Implementation Status ✅ COMPLETED
+## Phase 1: Foundation & File Access ✅ COMPLETED
 
-**Foundation & File Access Infrastructure** - All core components implemented and tested
+Phase 1 established the core file handling infrastructure with SIMD-optimized line detection, zero-copy memory mapping, and comprehensive trait-based architecture. All 64 tests passing.
 
-- ✅ **Project Setup**: Cargo.toml, module structure, dependencies configured
-- ✅ **Error Infrastructure**: Custom error types with thiserror, standardized Result<T>
-- ✅ **File Handler Traits**: FileAccessor trait, compression detection, file validation
-- ✅ **Memory Mapping**: MmapFileAccessor with lazy indexing and zero-copy line extraction
-- ✅ **Zero-Copy Optimization**: InMemoryFileAccessor and LineIndex refactored for efficiency
-- ✅ **Factory Pattern**: FileAccessorFactory with automatic strategy selection
-- ✅ **Comprehensive Testing**: 64/64 tests passing across all file_handler modules
+## Phase 2: Core Components 🚧 IN PROGRESS
 
-**Key Achievements**:
-- SIMD-optimized line boundary detection using memchr
-- Platform-aware file size thresholds (10MB default, 50MB macOS)
-- Zero-copy string extraction with Cow<str> for memory efficiency
-- Thread-safe memory mapping with RwLock for concurrent access
-- Integrated file validation and compression detection
+**Goal**: Implementation of compression support, SIMD-optimized search, terminal UI, and application coordination
 
-### Architectural Decisions Made
+### Task 5: Add Compression Support (gzip, bzip2, xz)
+- [ ] Enhance `detect_compression()` to identify formats from headers and extensions
+- [ ] Create `CompressionAdapter` trait for unified decompression interface
+- [ ] Implement streaming decompression to avoid memory explosion
+- [ ] Create `CompressedFileAccessor` wrapper for transparent decompression
+- [ ] Support gzip (flate2), bzip2, xz (xz2), and zstd formats
+- [ ] Add compressed file size estimation for progress reporting
+- [ ] Integrate with `FileAccessorFactory` for seamless handling
 
-#### Error Strategy
-- Use `thiserror` for custom errors with good derive support
-- `anyhow` for application-level error handling with context
-- Custom `Result<T>` type alias for consistency
+### Task 6: Create Search Engine Module with ripgrep Integration
+- [ ] Define `SearchEngine` trait with async search methods
+- [ ] Create `SearchMatch` struct (line_number, byte_offset, match_text, context)
+- [ ] Define `SearchOptions` (case_sensitive, whole_word, regex_mode, context_lines)
+- [ ] Implement `RipgrepEngine` with direct ripgrep-core integration
+- [ ] Add LRU cache for search results
+- [ ] Implement bidirectional search navigation (next/previous)
+- [ ] Add ReDoS protection with timeouts
+- [ ] Ensure <500ms search performance for 40GB files
 
-#### File Access Strategy
-- Trait-first design enables testing and future extensions
-- Memory mapping as primary strategy with streaming fallback
-- Line indexing for efficient random access to large files
+### Task 7: Implement UI Module with ratatui Terminal Interface
+- [ ] Define `UIRenderer` trait (render, handle_event, resize methods)
+- [ ] Implement event-driven architecture with `UICommand` pattern
+- [ ] Create `NavigationCommand` enum (LineUp, PageDown, GoToEnd, etc.)
+- [ ] Create `SearchCommand` enum (SearchForward, NextMatch, etc.)
+- [ ] Implement `TerminalUI` with ratatui backend
+- [ ] Add key binding system matching less interface
+- [ ] Implement viewport management for large content
+- [ ] Add search match highlighting in display
+- [ ] Ensure <50ms navigation response time
 
-#### Module Boundaries
-- `error.rs` - Centralized error types, used by all modules
-- `file_handler.rs` - File access abstraction, core performance component  
-- Clear separation of concerns, minimal cross-dependencies
+### Task 8: Create Application Core with State Management
+- [ ] Create `Application` struct coordinating all components via traits
+- [ ] Implement `ApplicationState` with atomic state management
+- [ ] Define `ViewState` (current_line, visible_lines, search_matches, buffer)
+- [ ] Implement central async event loop handling UI commands
+- [ ] Add file loading and management functionality
+- [ ] Implement command handling and state transitions
+- [ ] Add graceful error recovery and user feedback
+- [ ] Ensure <100ms startup time
 
-#### Testing Strategy
-- Unit tests for each module's public interface
-- Mock implementations via traits for isolated testing
-- Property-based testing for file access edge cases
+### Performance Targets
+- **Compression Detection**: <10ms for format identification
+- **Decompression Stream**: <100ms to start reading compressed files
+- **Initial Search**: <500ms for 40GB files
+- **Navigation**: <50ms response time
+- **Memory Usage**: <100MB total, <50MB for search operations
+- **Startup**: <100ms from CLI to interactive

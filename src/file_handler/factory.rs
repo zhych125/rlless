@@ -7,7 +7,9 @@
 
 use crate::error::{Result, RllessError};
 use crate::file_handler::accessor::FileAccessor;
-use crate::file_handler::compression::{detect_compression, CompressionType};
+use crate::file_handler::compression::{
+    detect_compression, CompressedFileAccessor, CompressionType,
+};
 use crate::file_handler::in_memory::InMemoryFileAccessor;
 use crate::file_handler::mmap::MmapFileAccessor;
 use crate::file_handler::validation::validate_file_path;
@@ -36,6 +38,7 @@ impl FileAccessorFactory {
     ///
     /// Files smaller than this are loaded entirely into memory for fast access.
     /// Files larger than this use memory mapping for memory efficiency.
+    #[cfg(not(target_os = "macos"))]
     const SMALL_FILE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10MB
 
     /// Platform-specific threshold for macOS
@@ -56,8 +59,8 @@ impl FileAccessorFactory {
     ///
     /// # Strategy
     /// 1. Validate file (existence, permissions, reasonable size)
-    /// 2. Detect compression format (for future use)
-    /// 3. Choose implementation based on file size and platform
+    /// 2. Detect compression format and handle transparently if compressed
+    /// 3. Choose implementation based on file size and platform for uncompressed files
     ///
     /// # Errors
     /// * File validation errors (non-existent, empty, too large, not readable)
@@ -82,17 +85,13 @@ impl FileAccessorFactory {
 
         let file_size = metadata.len();
 
-        // 3. Detect compression (for future use, currently just for logging/planning)
-        let compression = detect_compression(path)?;
+        // 3. Detect compression and handle compressed files transparently
+        let compression = detect_compression(path).await?;
         if compression != CompressionType::None {
-            // Future: Handle compressed files specially
-            // For now: proceed with normal strategy but compressed files will work
-            // through the normal accessors (they'll see the compressed bytes)
-            eprintln!(
-                "Note: Detected {:?} compression in {}, processing as-is",
-                compression,
-                path.display()
-            );
+            // Handle compressed files with transparent decompression
+            return Ok(Box::new(
+                CompressedFileAccessor::new(path, compression).await?,
+            ));
         }
 
         // 4. Choose implementation based on file size and platform
@@ -294,20 +293,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_compression_detection_integration() {
-        // Create a file that looks like gzip (magic number)
-        let gzip_header = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00];
-        let mut content = gzip_header.to_vec();
-        content.extend(b"some compressed data here to make it larger");
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
 
-        let compressed_file = create_test_file(&content);
+        // Create actual compressed data
+        let original_text = "line 1\nline 2\nline 3\nThis is a test file with multiple lines\n";
 
-        // Factory should detect compression but still create accessor
-        let accessor = FileAccessorFactory::create(compressed_file.path())
-            .await
-            .unwrap();
+        // Create a real gzip compressed file
+        let temp_file = NamedTempFile::new().unwrap();
+        {
+            let file = std::fs::File::create(temp_file.path()).unwrap();
+            let mut encoder = GzEncoder::new(file, Compression::default());
+            encoder.write_all(original_text.as_bytes()).unwrap();
+            encoder.finish().unwrap();
+        }
 
-        // Should still work (will see compressed bytes, but that's expected for now)
+        // Factory should detect compression and decompress transparently
+        let accessor = FileAccessorFactory::create(temp_file.path()).await.unwrap();
+
+        // Should be able to read the decompressed content
+        let first_line = accessor.read_line(0).await.unwrap();
+        assert_eq!(first_line, "line 1");
+
+        let second_line = accessor.read_line(1).await.unwrap();
+        assert_eq!(second_line, "line 2");
+
+        // File size should be the uncompressed size
         assert!(accessor.file_size() > 0);
+        assert_eq!(accessor.total_lines(), Some(4));
     }
 
     #[tokio::test]

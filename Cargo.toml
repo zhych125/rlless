@@ -41,10 +41,10 @@ async-trait = "0.1"
 # Command-line argument parsing
 clap = { version = "4.5", features = ["derive"] }
 
-# Compression support (optional features)
-flate2 = { version = "1.0", optional = true }
-bzip2 = { version = "0.4", optional = true }
-xz2 = { version = "0.1", optional = true }
+# Compression support
+async-compression = { version = "0.4", features = ["tokio", "gzip", "bzip2", "xz", "zstd"] }
+zstd = "0.13"
+tempfile = "3.8"
 
 # Configuration support (optional for Phase 4)
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -58,14 +58,11 @@ env_logger = "0.11"
 # Testing dependencies
 proptest = "1.4"
 criterion = { version = "0.5", features = ["html_reports"] }
-tempfile = "3.8"
 tokio-test = "0.4"
+flate2 = "1.0"  # For creating real compressed test data
 
 [features]
-default = ["compression"]
-
-# Compression format support
-compression = ["flate2", "bzip2", "xz2"]
+default = []
 
 # Configuration system (for Phase 4)
 config = ["serde", "toml", "dirs"]
