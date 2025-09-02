@@ -152,14 +152,19 @@ impl FileAccessor for MmapFileAccessor {
         Ok(lines)
     }
 
-    async fn find_next_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>> {
+    async fn find_next_match(
+        &self,
+        start_line: u64,
+        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+    ) -> Result<Option<MatchInfo>> {
         let mut current_line = start_line;
 
         // Search forward line by line
         loop {
             match self.extract_line(current_line) {
                 Ok(line_content) => {
-                    if let Some(match_start) = line_content.find(pattern) {
+                    let match_ranges = search_fn(&line_content);
+                    if !match_ranges.is_empty() {
                         // Get byte offset for this line
                         let byte_offset = {
                             let index = self.line_index.read();
@@ -175,8 +180,7 @@ impl FileAccessor for MmapFileAccessor {
                             line_number: current_line,
                             byte_offset,
                             line_content: line_content.into_owned(), // MatchInfo needs owned String
-                            match_start,
-                            match_end: match_start + pattern.len(),
+                            match_ranges,
                         }));
                     }
                     current_line += 1;
@@ -191,7 +195,11 @@ impl FileAccessor for MmapFileAccessor {
         }
     }
 
-    async fn find_prev_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>> {
+    async fn find_prev_match(
+        &self,
+        start_line: u64,
+        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+    ) -> Result<Option<MatchInfo>> {
         if start_line == 0 {
             return Ok(None);
         }
@@ -200,7 +208,8 @@ impl FileAccessor for MmapFileAccessor {
         for current_line in (0..start_line).rev() {
             match self.extract_line(current_line) {
                 Ok(line_content) => {
-                    if let Some(match_start) = line_content.find(pattern) {
+                    let match_ranges = search_fn(&line_content);
+                    if !match_ranges.is_empty() {
                         // Get byte offset for this line
                         let byte_offset = {
                             let index = self.line_index.read();
@@ -216,8 +225,7 @@ impl FileAccessor for MmapFileAccessor {
                             line_number: current_line,
                             byte_offset,
                             line_content: line_content.into_owned(), // MatchInfo needs owned String
-                            match_start,
-                            match_end: match_start + pattern.len(),
+                            match_ranges,
                         }));
                     }
                 }
@@ -334,20 +342,33 @@ mod tests {
         let temp_file = create_test_file(content);
         let accessor = MmapFileAccessor::new(temp_file.path()).await.unwrap();
 
-        let match_info = accessor.find_next_match(0, "error").await.unwrap();
+        // Create a search function for "error"
+        let error_search = |line: &str| {
+            let mut matches = Vec::new();
+            let mut start = 0;
+            while let Some(pos) = line[start..].find("error") {
+                let match_start = start + pos;
+                let match_end = match_start + "error".len();
+                matches.push((match_start, match_end));
+                start = match_end;
+            }
+            matches
+        };
+
+        let match_info = accessor.find_next_match(0, &error_search).await.unwrap();
         assert!(match_info.is_some());
 
         let info = match_info.unwrap();
         assert_eq!(info.line_number, 0);
         assert_eq!(info.line_content, "error on line1");
-        assert_eq!(info.match_start, 0);
-        assert_eq!(info.match_end, 5);
+        assert_eq!(info.match_ranges, vec![(0, 5)]);
 
-        let match_info = accessor.find_next_match(1, "error").await.unwrap();
+        let match_info = accessor.find_next_match(1, &error_search).await.unwrap();
         assert!(match_info.is_some());
         assert_eq!(match_info.unwrap().line_number, 2);
 
-        let match_info = accessor.find_next_match(0, "nonexistent").await.unwrap();
+        let no_match_search = |_line: &str| Vec::new();
+        let match_info = accessor.find_next_match(0, &no_match_search).await.unwrap();
         assert!(match_info.is_none());
     }
 
@@ -357,15 +378,28 @@ mod tests {
         let temp_file = create_test_file(content);
         let accessor = MmapFileAccessor::new(temp_file.path()).await.unwrap();
 
-        let match_info = accessor.find_prev_match(4, "error").await.unwrap();
+        // Create a search function for "error"
+        let error_search = |line: &str| {
+            let mut matches = Vec::new();
+            let mut start = 0;
+            while let Some(pos) = line[start..].find("error") {
+                let match_start = start + pos;
+                let match_end = match_start + "error".len();
+                matches.push((match_start, match_end));
+                start = match_end;
+            }
+            matches
+        };
+
+        let match_info = accessor.find_prev_match(4, &error_search).await.unwrap();
         assert!(match_info.is_some());
         assert_eq!(match_info.unwrap().line_number, 2);
 
-        let match_info = accessor.find_prev_match(2, "error").await.unwrap();
+        let match_info = accessor.find_prev_match(2, &error_search).await.unwrap();
         assert!(match_info.is_some());
         assert_eq!(match_info.unwrap().line_number, 0);
 
-        let match_info = accessor.find_prev_match(0, "error").await.unwrap();
+        let match_info = accessor.find_prev_match(0, &error_search).await.unwrap();
         assert!(match_info.is_none());
     }
 

@@ -200,15 +200,23 @@ impl FileAccessor for CompressedFileAccessor {
         self.inner_accessor.read_lines_range(start, count).await
     }
 
-    async fn find_next_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>> {
+    async fn find_next_match(
+        &self,
+        start_line: u64,
+        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+    ) -> Result<Option<MatchInfo>> {
         self.inner_accessor
-            .find_next_match(start_line, pattern)
+            .find_next_match(start_line, search_fn)
             .await
     }
 
-    async fn find_prev_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>> {
+    async fn find_prev_match(
+        &self,
+        start_line: u64,
+        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+    ) -> Result<Option<MatchInfo>> {
         self.inner_accessor
-            .find_prev_match(start_line, pattern)
+            .find_prev_match(start_line, search_fn)
             .await
     }
 

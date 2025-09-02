@@ -23,13 +23,9 @@ pub struct MatchInfo {
     /// Owned string since MatchInfo is typically consumed for highlighting/display
     pub line_content: String,
 
-    /// Character position within the line where match starts
-    /// Used for highlighting in UI
-    pub match_start: usize,
-
-    /// Character position within the line where match ends
-    /// Used for highlighting in UI
-    pub match_end: usize,
+    /// Vector of (start, end) pairs for multiple matches in the same line
+    /// Each tuple represents a character range within the line for highlighting
+    pub match_ranges: Vec<(usize, usize)>,
 }
 
 /// Core trait for file access operations
@@ -77,15 +73,15 @@ pub trait FileAccessor: Send + Sync {
     /// Each Cow can be used with .as_ref() for &str or .into_owned() for String
     async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<Cow<'_, str>>>;
 
-    /// Find next occurrence of pattern searching forward from start_line
+    /// Find next occurrence using a search function from start_line
     ///
     /// # Arguments
     /// * `start_line` - Line number to start searching from (inclusive)
-    /// * `pattern` - String pattern to search for (substring match)
+    /// * `search_fn` - Function that returns match ranges for a given line
     ///
     /// # Returns
-    /// * Some(MatchInfo) if pattern found
-    /// * None if pattern not found before EOF
+    /// * Some(MatchInfo) if matches found
+    /// * None if no matches found before EOF
     ///
     /// # Performance
     /// * Searches incrementally, returns as soon as match found
@@ -93,17 +89,22 @@ pub trait FileAccessor: Send + Sync {
     ///
     /// # Usage
     /// Used for 'n' (next) command in search, Find Next in UI
-    async fn find_next_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>>;
+    /// SearchEngine creates search functions for regex/complex patterns
+    async fn find_next_match(
+        &self,
+        start_line: u64,
+        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+    ) -> Result<Option<MatchInfo>>;
 
-    /// Find previous occurrence of pattern searching backward from start_line
+    /// Find previous occurrence using a search function searching backward from start_line
     ///
     /// # Arguments
     /// * `start_line` - Line number to start searching from (exclusive)
-    /// * `pattern` - String pattern to search for (substring match)
+    /// * `search_fn` - Function that returns match ranges for a given line
     ///
     /// # Returns
-    /// * Some(MatchInfo) if pattern found
-    /// * None if pattern not found before beginning of file
+    /// * Some(MatchInfo) if matches found
+    /// * None if no matches found before beginning of file
     ///
     /// # Performance
     /// * Searches incrementally backward
@@ -111,7 +112,12 @@ pub trait FileAccessor: Send + Sync {
     ///
     /// # Usage
     /// Used for 'N' (previous) command in search, Find Previous in UI
-    async fn find_prev_match(&self, start_line: u64, pattern: &str) -> Result<Option<MatchInfo>>;
+    /// SearchEngine creates search functions for regex/complex patterns
+    async fn find_prev_match(
+        &self,
+        start_line: u64,
+        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+    ) -> Result<Option<MatchInfo>>;
 
     /// Get the total file size in bytes
     ///
@@ -234,16 +240,16 @@ pub mod tests {
         async fn find_next_match(
             &self,
             start_line: u64,
-            pattern: &str,
+            search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
         ) -> Result<Option<MatchInfo>> {
             for (i, line) in self.lines.iter().enumerate().skip(start_line as usize) {
-                if let Some(match_start) = line.find(pattern) {
+                let match_ranges = search_fn(line);
+                if !match_ranges.is_empty() {
                     return Ok(Some(MatchInfo {
                         line_number: i as u64,
                         byte_offset: 0, // Mock doesn't track byte offsets
                         line_content: line.clone(),
-                        match_start,
-                        match_end: match_start + pattern.len(),
+                        match_ranges,
                     }));
                 }
             }
@@ -253,7 +259,7 @@ pub mod tests {
         async fn find_prev_match(
             &self,
             start_line: u64,
-            pattern: &str,
+            search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
         ) -> Result<Option<MatchInfo>> {
             if start_line == 0 {
                 return Ok(None);
@@ -261,13 +267,13 @@ pub mod tests {
 
             for i in (0..start_line as usize).rev() {
                 if let Some(line) = self.lines.get(i) {
-                    if let Some(match_start) = line.find(pattern) {
+                    let match_ranges = search_fn(line);
+                    if !match_ranges.is_empty() {
                         return Ok(Some(MatchInfo {
                             line_number: i as u64,
                             byte_offset: 0, // Mock doesn't track byte offsets
                             line_content: line.clone(),
-                            match_start,
-                            match_end: match_start + pattern.len(),
+                            match_ranges,
                         }));
                     }
                 }
@@ -390,24 +396,38 @@ pub mod tests {
         ];
         let accessor = MockFileAccessor::from_lines(lines);
 
+        // Create a simple string search function
+        let pattern_search = |line: &str| {
+            let mut matches = Vec::new();
+            let mut start = 0;
+            while let Some(pos) = line[start..].find("pattern") {
+                let match_start = start + pos;
+                let match_end = match_start + "pattern".len();
+                matches.push((match_start, match_end));
+                start = match_end;
+            }
+            matches
+        };
+
         // Test finding from beginning
-        let result = accessor.find_next_match(0, "pattern").await.unwrap();
+        let result = accessor.find_next_match(0, &pattern_search).await.unwrap();
         assert!(result.is_some());
         let match_info = result.unwrap();
         assert_eq!(match_info.line_number, 0);
         assert_eq!(match_info.line_content, "First line with pattern");
-        assert_eq!(match_info.match_start, 16);
-        assert_eq!(match_info.match_end, 23);
+        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
 
         // Test finding from middle
-        let result = accessor.find_next_match(1, "pattern").await.unwrap();
+        let result = accessor.find_next_match(1, &pattern_search).await.unwrap();
         assert!(result.is_some());
         let match_info = result.unwrap();
         assert_eq!(match_info.line_number, 2);
         assert_eq!(match_info.line_content, "Third line with pattern again");
+        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
 
         // Test not found
-        let result = accessor.find_next_match(0, "nonexistent").await.unwrap();
+        let no_match_search = |_line: &str| Vec::new();
+        let result = accessor.find_next_match(0, &no_match_search).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -420,21 +440,36 @@ pub mod tests {
         ];
         let accessor = MockFileAccessor::from_lines(lines);
 
+        // Create a simple string search function
+        let pattern_search = |line: &str| {
+            let mut matches = Vec::new();
+            let mut start = 0;
+            while let Some(pos) = line[start..].find("pattern") {
+                let match_start = start + pos;
+                let match_end = match_start + "pattern".len();
+                matches.push((match_start, match_end));
+                start = match_end;
+            }
+            matches
+        };
+
         // Test finding backward from end
-        let result = accessor.find_prev_match(3, "pattern").await.unwrap();
+        let result = accessor.find_prev_match(3, &pattern_search).await.unwrap();
         assert!(result.is_some());
         let match_info = result.unwrap();
         assert_eq!(match_info.line_number, 2);
         assert_eq!(match_info.line_content, "Third line with pattern again");
+        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
 
         // Test finding backward from middle
-        let result = accessor.find_prev_match(2, "pattern").await.unwrap();
+        let result = accessor.find_prev_match(2, &pattern_search).await.unwrap();
         assert!(result.is_some());
         let match_info = result.unwrap();
         assert_eq!(match_info.line_number, 0);
+        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
 
         // Test not found from beginning
-        let result = accessor.find_prev_match(0, "pattern").await.unwrap();
+        let result = accessor.find_prev_match(0, &pattern_search).await.unwrap();
         assert!(result.is_none());
     }
 }
