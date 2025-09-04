@@ -181,6 +181,8 @@ impl FileAccessor for MmapFileAccessor {
                             byte_offset,
                             line_content: line_content.into_owned(), // MatchInfo needs owned String
                             match_ranges,
+                            context_before: Vec::new(),
+                            context_after: Vec::new(),
                         }));
                     }
                     current_line += 1;
@@ -226,6 +228,8 @@ impl FileAccessor for MmapFileAccessor {
                             byte_offset,
                             line_content: line_content.into_owned(), // MatchInfo needs owned String
                             match_ranges,
+                            context_before: Vec::new(),
+                            context_after: Vec::new(),
                         }));
                     }
                 }

@@ -35,7 +35,8 @@ pub use error::{Result, RllessError};
 
 // Public API surface for external usage
 pub use app::Application;
-pub use file_handler::{CompressionType, FileAccessor};
+pub use file_handler::{CompressionType, FileAccessor, MatchInfo};
+pub use search::{RipgrepEngine, SearchEngine, SearchOptions, SearchStats};
 
 // Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

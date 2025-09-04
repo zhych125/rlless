@@ -129,6 +129,8 @@ impl FileAccessor for InMemoryFileAccessor {
                     byte_offset: self.line_index.get_line_offsets()[current_line as usize],
                     line_content: line_content.into_owned(), // Convert Cow to String for MatchInfo
                     match_ranges,
+                    context_before: Vec::new(),
+                    context_after: Vec::new(),
                 }));
             }
         }
@@ -155,6 +157,8 @@ impl FileAccessor for InMemoryFileAccessor {
                     byte_offset: self.line_index.get_line_offsets()[current_line as usize],
                     line_content: line_content.into_owned(), // Convert Cow to String for MatchInfo
                     match_ranges,
+                    context_before: Vec::new(),
+                    context_after: Vec::new(),
                 }));
             }
         }

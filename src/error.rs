@@ -104,6 +104,16 @@ impl RllessError {
         }
     }
 
+    /// Create a SearchError with a descriptive message and source error
+    pub fn search_error(
+        message: impl Into<String>,
+        _source: Box<dyn std::error::Error + Send + Sync>,
+    ) -> Self {
+        Self::SearchError {
+            message: message.into(),
+        }
+    }
+
     /// Create a UIError with a descriptive message
     pub fn ui(message: impl Into<String>) -> Self {
         Self::UIError {

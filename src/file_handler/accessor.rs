@@ -26,6 +26,14 @@ pub struct MatchInfo {
     /// Vector of (start, end) pairs for multiple matches in the same line
     /// Each tuple represents a character range within the line for highlighting
     pub match_ranges: Vec<(usize, usize)>,
+
+    /// Context lines before the match (if requested)
+    /// Used by search engine for grep-like context display
+    pub context_before: Vec<String>,
+
+    /// Context lines after the match (if requested)
+    /// Used by search engine for grep-like context display
+    pub context_after: Vec<String>,
 }
 
 /// Core trait for file access operations
@@ -250,6 +258,8 @@ pub mod tests {
                         byte_offset: 0, // Mock doesn't track byte offsets
                         line_content: line.clone(),
                         match_ranges,
+                        context_before: Vec::new(),
+                        context_after: Vec::new(),
                     }));
                 }
             }
@@ -274,6 +284,8 @@ pub mod tests {
                             byte_offset: 0, // Mock doesn't track byte offsets
                             line_content: line.clone(),
                             match_ranges,
+                            context_before: Vec::new(),
+                            context_after: Vec::new(),
                         }));
                     }
                 }
