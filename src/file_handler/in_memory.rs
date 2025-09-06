@@ -4,7 +4,7 @@
 //! entire file content into memory and provides zero-copy line access.
 
 use crate::error::{Result, RllessError};
-use crate::file_handler::accessor::{FileAccessor, MatchInfo};
+use crate::file_handler::accessor::FileAccessor;
 use crate::file_handler::line_index::LineIndex;
 use async_trait::async_trait;
 use std::borrow::Cow;
@@ -26,6 +26,9 @@ pub struct InMemoryFileAccessor {
 
     /// Total number of lines (computed during construction)
     total_lines: u64,
+
+    /// Original file path
+    file_path: std::path::PathBuf,
 }
 
 impl InMemoryFileAccessor {
@@ -33,6 +36,7 @@ impl InMemoryFileAccessor {
     ///
     /// # Arguments
     /// * `content` - File content as bytes
+    /// * `file_path` - Path to the original file
     ///
     /// # Returns
     /// * New InMemoryFileAccessor instance ready for zero-copy access
@@ -40,7 +44,7 @@ impl InMemoryFileAccessor {
     /// # Performance
     /// * O(n) - Scans entire content once to build line boundary index
     /// * All subsequent line operations are O(1) zero-copy extractions
-    pub fn new(content: Vec<u8>) -> Self {
+    pub fn new(content: Vec<u8>, file_path: std::path::PathBuf) -> Self {
         let file_size = content.len() as u64;
         let mut line_index = LineIndex::new();
 
@@ -54,6 +58,7 @@ impl InMemoryFileAccessor {
             file_size,
             line_index,
             total_lines,
+            file_path,
         }
     }
 
@@ -118,20 +123,13 @@ impl FileAccessor for InMemoryFileAccessor {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         for current_line in start_line..self.total_lines {
             let line_content = self.extract_line(current_line)?;
             let match_ranges = search_fn(&line_content);
 
             if !match_ranges.is_empty() {
-                return Ok(Some(MatchInfo {
-                    line_number: current_line,
-                    byte_offset: self.line_index.get_line_offsets()[current_line as usize],
-                    line_content: line_content.into_owned(), // Convert Cow to String for MatchInfo
-                    match_ranges,
-                    context_before: Vec::new(),
-                    context_after: Vec::new(),
-                }));
+                return Ok(Some(current_line));
             }
         }
 
@@ -142,7 +140,7 @@ impl FileAccessor for InMemoryFileAccessor {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         if start_line == 0 {
             return Ok(None);
         }
@@ -152,14 +150,7 @@ impl FileAccessor for InMemoryFileAccessor {
             let match_ranges = search_fn(&line_content);
 
             if !match_ranges.is_empty() {
-                return Ok(Some(MatchInfo {
-                    line_number: current_line,
-                    byte_offset: self.line_index.get_line_offsets()[current_line as usize],
-                    line_content: line_content.into_owned(), // Convert Cow to String for MatchInfo
-                    match_ranges,
-                    context_before: Vec::new(),
-                    context_after: Vec::new(),
-                }));
+                return Ok(Some(current_line));
             }
         }
 
@@ -172,6 +163,10 @@ impl FileAccessor for InMemoryFileAccessor {
 
     fn total_lines(&self) -> Option<u64> {
         Some(self.total_lines)
+    }
+
+    fn file_path(&self) -> &std::path::Path {
+        &self.file_path
     }
 }
 
@@ -192,7 +187,7 @@ mod tests {
     fn test_new_in_memory_accessor() {
         let content = create_test_content();
         let file_size = content.len();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         assert_eq!(accessor.file_size(), file_size as u64);
         assert_eq!(accessor.total_lines(), Some(4));
@@ -202,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_line() {
         let content = create_test_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         let line0 = accessor.read_line(0).await.unwrap();
         assert_eq!(line0, "line1");
@@ -217,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_line_out_of_bounds() {
         let content = create_test_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         let result = accessor.read_line(999).await;
         assert!(result.is_err());
@@ -229,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_lines_range() {
         let content = create_test_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         let lines = accessor.read_lines_range(1, 2).await.unwrap();
         assert_eq!(lines, vec!["line2", "line3"]);
@@ -244,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn test_find_next_match() {
         let content = b"error on line1\nno match here\nerror on line3\nfinal line\n".to_vec();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         // Create a search function for "error"
         let error_search = |line: &str| {
@@ -259,27 +254,23 @@ mod tests {
             matches
         };
 
-        let match_info = accessor.find_next_match(0, &error_search).await.unwrap();
-        assert!(match_info.is_some());
+        let line_num = accessor.find_next_match(0, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 0);
 
-        let info = match_info.unwrap();
-        assert_eq!(info.line_number, 0);
-        assert_eq!(info.line_content, "error on line1");
-        assert_eq!(info.match_ranges, vec![(0, 5)]);
-
-        let match_info = accessor.find_next_match(1, &error_search).await.unwrap();
-        assert!(match_info.is_some());
-        assert_eq!(match_info.unwrap().line_number, 2);
+        let line_num = accessor.find_next_match(1, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 2);
 
         let no_match_search = |_line: &str| Vec::new();
-        let match_info = accessor.find_next_match(0, &no_match_search).await.unwrap();
-        assert!(match_info.is_none());
+        let line_num = accessor.find_next_match(0, &no_match_search).await.unwrap();
+        assert!(line_num.is_none());
     }
 
     #[tokio::test]
     async fn test_find_prev_match() {
         let content = b"error on line1\nno match here\nerror on line3\nfinal line\n".to_vec();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         // Create a search function for "error"
         let error_search = |line: &str| {
@@ -294,32 +285,32 @@ mod tests {
             matches
         };
 
-        let match_info = accessor.find_prev_match(4, &error_search).await.unwrap();
-        assert!(match_info.is_some());
-        assert_eq!(match_info.unwrap().line_number, 2);
+        let line_num = accessor.find_prev_match(4, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 2);
 
-        let match_info = accessor.find_prev_match(2, &error_search).await.unwrap();
-        assert!(match_info.is_some());
-        assert_eq!(match_info.unwrap().line_number, 0);
+        let line_num = accessor.find_prev_match(2, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 0);
 
-        let match_info = accessor.find_prev_match(0, &error_search).await.unwrap();
-        assert!(match_info.is_none());
+        let line_num = accessor.find_prev_match(0, &error_search).await.unwrap();
+        assert!(line_num.is_none());
     }
 
     #[tokio::test]
     async fn test_total_lines_always_available() {
         let content = create_test_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         assert_eq!(accessor.total_lines(), Some(4));
 
-        let empty_accessor = InMemoryFileAccessor::new(Vec::new());
+        let empty_accessor = InMemoryFileAccessor::new(Vec::new(), "/test/empty.txt".into());
         assert_eq!(empty_accessor.total_lines(), Some(0));
     }
 
     #[tokio::test]
     async fn test_empty_content() {
-        let accessor = InMemoryFileAccessor::new(Vec::new());
+        let accessor = InMemoryFileAccessor::new(Vec::new(), "/test/empty.txt".into());
 
         assert_eq!(accessor.file_size(), 0);
         assert_eq!(accessor.total_lines(), Some(0));
@@ -334,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_line_no_newline() {
         let content = b"single line without newline".to_vec();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         assert_eq!(accessor.total_lines(), Some(1));
 
@@ -348,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_complex_content() {
         let content = create_complex_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         assert_eq!(accessor.total_lines(), Some(5));
 
@@ -371,7 +362,7 @@ mod tests {
     #[tokio::test]
     async fn test_all_lines_accessible() {
         let content = create_test_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         // All lines should be accessible immediately (zero-copy extraction)
         for line_num in 0..accessor.total_lines().unwrap() {
@@ -383,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn test_repeated_access_performance() {
         let content = create_test_content();
-        let accessor = InMemoryFileAccessor::new(content);
+        let accessor = InMemoryFileAccessor::new(content, "/test/file.txt".into());
 
         // Multiple accesses should be consistent and fast (zero-copy extraction)
         for _ in 0..100 {

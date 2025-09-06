@@ -21,7 +21,6 @@ use ratatui::{
     widgets::Paragraph,
     Frame, Terminal,
 };
-use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -34,7 +33,6 @@ type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 pub struct TerminalUI {
     terminal: Option<CrosstermTerminal>,
     theme: ColorTheme,
-    search_highlights: HashMap<u64, Vec<(usize, usize)>>,
 }
 
 impl TerminalUI {
@@ -43,7 +41,6 @@ impl TerminalUI {
         Ok(Self {
             terminal: None,
             theme: ColorTheme::default(),
-            search_highlights: HashMap::new(),
         })
     }
 
@@ -52,7 +49,6 @@ impl TerminalUI {
         Ok(Self {
             terminal: None,
             theme,
-            search_highlights: HashMap::new(),
         })
     }
 
@@ -114,7 +110,6 @@ impl TerminalUI {
         frame: &mut Frame,
         area: Rect,
         view_state: &ViewState,
-        search_highlights: &HashMap<u64, Vec<(usize, usize)>>,
         theme: &ColorTheme,
     ) {
         let content_lines: Vec<Line> = view_state
@@ -125,7 +120,7 @@ impl TerminalUI {
                 let line_number = view_state.viewport_top + idx as u64;
 
                 // Check for search highlights on this line
-                if let Some(highlights) = search_highlights.get(&line_number) {
+                if let Some(highlights) = view_state.search_highlights.get(&line_number) {
                     Self::create_highlighted_line_with_theme(line.as_ref(), highlights, theme)
                 } else {
                     Line::from(line.as_ref())
@@ -197,8 +192,7 @@ impl TerminalUI {
 impl UIRenderer for TerminalUI {
     fn render(&mut self, view_state: &ViewState) -> Result<()> {
         if let Some(ref mut terminal) = self.terminal {
-            // Extract data before closure to avoid borrowing issues
-            let search_highlights = &self.search_highlights;
+            // Extract theme before closure to avoid borrowing issues
             let theme = &self.theme;
 
             terminal.draw(move |frame| {
@@ -210,14 +204,8 @@ impl UIRenderer for TerminalUI {
                     .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
                     .split(size);
 
-                // Render content area
-                Self::render_content_with_data(
-                    frame,
-                    chunks[0],
-                    view_state,
-                    search_highlights,
-                    theme,
-                );
+                // Render content area - highlights are now in view_state
+                Self::render_content_with_data(frame, chunks[0], view_state, theme);
 
                 // Render status line
                 Self::render_status_with_data(frame, chunks[1], view_state, theme);
@@ -263,17 +251,6 @@ impl UIRenderer for TerminalUI {
         let (cols, rows) = ratatui::crossterm::terminal::size()?;
         Ok((cols, rows))
     }
-
-    fn set_search_highlights(&mut self, line_highlights: &[(u64, Vec<(usize, usize)>)]) {
-        self.search_highlights.clear();
-        for &(line_num, ref ranges) in line_highlights {
-            self.search_highlights.insert(line_num, ranges.clone());
-        }
-    }
-
-    fn clear_search_highlights(&mut self) {
-        self.search_highlights.clear();
-    }
 }
 
 impl Drop for TerminalUI {
@@ -293,7 +270,6 @@ mod tests {
         assert!(ui.is_ok());
         let ui = ui.unwrap();
         assert!(ui.terminal.is_none());
-        assert!(ui.search_highlights.is_empty());
 
         // Test with custom theme
         let custom_theme = ColorTheme::monochrome();
@@ -379,21 +355,5 @@ mod tests {
             ui.key_to_command(KeyCode::Char('c'), KeyModifiers::CONTROL),
             Some(UICommand::Quit)
         );
-    }
-
-    #[test]
-    fn test_search_highlights() {
-        let mut ui = TerminalUI::new().unwrap();
-
-        // Test setting highlights
-        let highlights = vec![(10, vec![(0, 5), (10, 15)])];
-        ui.set_search_highlights(&highlights);
-
-        assert_eq!(ui.search_highlights.len(), 1);
-        assert_eq!(ui.search_highlights.get(&10), Some(&vec![(0, 5), (10, 15)]));
-
-        // Test clearing highlights
-        ui.clear_search_highlights();
-        assert!(ui.search_highlights.is_empty());
     }
 }

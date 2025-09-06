@@ -4,7 +4,7 @@
 //! for efficient access to large files with lazy line indexing and zero-copy string extraction.
 
 use crate::error::{Result, RllessError};
-use crate::file_handler::accessor::{FileAccessor, MatchInfo};
+use crate::file_handler::accessor::FileAccessor;
 use crate::file_handler::line_index::LineIndex;
 use async_trait::async_trait;
 use memmap2::Mmap;
@@ -36,6 +36,9 @@ pub struct MmapFileAccessor {
     /// but FileAccessor trait methods only take &self.
     /// Multiple readers can access simultaneously, writers get exclusive access.
     line_index: RwLock<LineIndex>,
+
+    /// Original file path
+    file_path: std::path::PathBuf,
 }
 
 impl MmapFileAccessor {
@@ -88,6 +91,7 @@ impl MmapFileAccessor {
             mmap,
             file_size,
             line_index: RwLock::new(LineIndex::new()),
+            file_path: file_path.to_path_buf(),
         })
     }
 
@@ -156,7 +160,7 @@ impl FileAccessor for MmapFileAccessor {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         let mut current_line = start_line;
 
         // Search forward line by line
@@ -165,25 +169,7 @@ impl FileAccessor for MmapFileAccessor {
                 Ok(line_content) => {
                     let match_ranges = search_fn(&line_content);
                     if !match_ranges.is_empty() {
-                        // Get byte offset for this line
-                        let byte_offset = {
-                            let index = self.line_index.read();
-                            let offsets = index.get_line_offsets();
-                            if current_line < offsets.len() as u64 {
-                                offsets[current_line as usize]
-                            } else {
-                                0 // Fallback, should not happen
-                            }
-                        };
-
-                        return Ok(Some(MatchInfo {
-                            line_number: current_line,
-                            byte_offset,
-                            line_content: line_content.into_owned(), // MatchInfo needs owned String
-                            match_ranges,
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        }));
+                        return Ok(Some(current_line));
                     }
                     current_line += 1;
                 }
@@ -201,7 +187,7 @@ impl FileAccessor for MmapFileAccessor {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         if start_line == 0 {
             return Ok(None);
         }
@@ -212,25 +198,7 @@ impl FileAccessor for MmapFileAccessor {
                 Ok(line_content) => {
                     let match_ranges = search_fn(&line_content);
                     if !match_ranges.is_empty() {
-                        // Get byte offset for this line
-                        let byte_offset = {
-                            let index = self.line_index.read();
-                            let offsets = index.get_line_offsets();
-                            if current_line < offsets.len() as u64 {
-                                offsets[current_line as usize]
-                            } else {
-                                0 // Fallback
-                            }
-                        };
-
-                        return Ok(Some(MatchInfo {
-                            line_number: current_line,
-                            byte_offset,
-                            line_content: line_content.into_owned(), // MatchInfo needs owned String
-                            match_ranges,
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        }));
+                        return Ok(Some(current_line));
                     }
                 }
                 Err(_) => continue, // Skip lines that can't be read
@@ -249,6 +217,10 @@ impl FileAccessor for MmapFileAccessor {
         // Return None until we need to scan the entire file
         // This is different from InMemoryFileAccessor which always knows the total
         None
+    }
+
+    fn file_path(&self) -> &std::path::Path {
+        &self.file_path
     }
 
     fn supports_parallel(&self) -> bool {
@@ -359,21 +331,17 @@ mod tests {
             matches
         };
 
-        let match_info = accessor.find_next_match(0, &error_search).await.unwrap();
-        assert!(match_info.is_some());
+        let line_num = accessor.find_next_match(0, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 0);
 
-        let info = match_info.unwrap();
-        assert_eq!(info.line_number, 0);
-        assert_eq!(info.line_content, "error on line1");
-        assert_eq!(info.match_ranges, vec![(0, 5)]);
-
-        let match_info = accessor.find_next_match(1, &error_search).await.unwrap();
-        assert!(match_info.is_some());
-        assert_eq!(match_info.unwrap().line_number, 2);
+        let line_num = accessor.find_next_match(1, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 2);
 
         let no_match_search = |_line: &str| Vec::new();
-        let match_info = accessor.find_next_match(0, &no_match_search).await.unwrap();
-        assert!(match_info.is_none());
+        let line_num = accessor.find_next_match(0, &no_match_search).await.unwrap();
+        assert!(line_num.is_none());
     }
 
     #[tokio::test]
@@ -395,16 +363,16 @@ mod tests {
             matches
         };
 
-        let match_info = accessor.find_prev_match(4, &error_search).await.unwrap();
-        assert!(match_info.is_some());
-        assert_eq!(match_info.unwrap().line_number, 2);
+        let line_num = accessor.find_prev_match(4, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 2);
 
-        let match_info = accessor.find_prev_match(2, &error_search).await.unwrap();
-        assert!(match_info.is_some());
-        assert_eq!(match_info.unwrap().line_number, 0);
+        let line_num = accessor.find_prev_match(2, &error_search).await.unwrap();
+        assert!(line_num.is_some());
+        assert_eq!(line_num.unwrap(), 0);
 
-        let match_info = accessor.find_prev_match(0, &error_search).await.unwrap();
-        assert!(match_info.is_none());
+        let line_num = accessor.find_prev_match(0, &error_search).await.unwrap();
+        assert!(line_num.is_none());
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ pub mod mmap;
 pub mod validation;
 
 // Re-export public API for convenient access
-pub use accessor::{AccessStrategy, FileAccessor, MatchInfo};
+pub use accessor::{AccessStrategy, FileAccessor};
 pub use compression::{detect_compression, CompressedFileAccessor, CompressionType};
 pub use factory::FileAccessorFactory;
 pub use in_memory::InMemoryFileAccessor;

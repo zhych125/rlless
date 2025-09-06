@@ -4,7 +4,6 @@
 //! and transparent decompression support for common compression formats used with log files.
 
 use crate::error::{Result, RllessError};
-use crate::file_handler::accessor::MatchInfo;
 use crate::file_handler::{FileAccessor, InMemoryFileAccessor, MmapFileAccessor};
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
 use async_trait::async_trait;
@@ -155,7 +154,7 @@ impl CompressedFileAccessor {
             if compressed_size < MEMORY_THRESHOLD {
                 // Small file: decompress to memory
                 let data = decompress_to_memory(path, compression).await?;
-                let accessor = InMemoryFileAccessor::new(data);
+                let accessor = InMemoryFileAccessor::new(data, path.to_path_buf());
                 (Box::new(accessor), None)
             } else {
                 // Large file: decompress to temp file and mmap
@@ -204,7 +203,7 @@ impl FileAccessor for CompressedFileAccessor {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         self.inner_accessor
             .find_next_match(start_line, search_fn)
             .await
@@ -214,7 +213,7 @@ impl FileAccessor for CompressedFileAccessor {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         self.inner_accessor
             .find_prev_match(start_line, search_fn)
             .await
@@ -226,6 +225,10 @@ impl FileAccessor for CompressedFileAccessor {
 
     fn total_lines(&self) -> Option<u64> {
         self.inner_accessor.total_lines()
+    }
+
+    fn file_path(&self) -> &std::path::Path {
+        &self.original_path
     }
 
     fn supports_parallel(&self) -> bool {

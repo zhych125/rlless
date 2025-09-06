@@ -40,19 +40,12 @@ pub trait UIRenderer {
     ///
     /// This method should:
     /// - Restore cursor
-    /// - Exit raw mode  
+    /// - Exit raw mode
     /// - Clear screen if needed
     fn cleanup(&mut self) -> Result<()>;
 
     /// Get current terminal dimensions
     fn get_terminal_size(&self) -> Result<(u16, u16)>; // (width, height)
-
-    /// Set search highlights for rendering
-    /// Called by Application after SearchEngine provides match data
-    fn set_search_highlights(&mut self, line_highlights: &[(u64, Vec<(usize, usize)>)]);
-
-    /// Clear all search highlights
-    fn clear_search_highlights(&mut self);
 }
 
 #[cfg(test)]
@@ -71,7 +64,6 @@ pub mod tests {
         pub render_count: usize,
         pub terminal_size: (u16, u16),
         pub input_sequence: VecDeque<UICommand>,
-        pub search_highlights: Vec<(u64, Vec<(usize, usize)>)>,
         pub is_initialized: bool,
     }
 
@@ -88,7 +80,6 @@ pub mod tests {
                 render_count: 0,
                 terminal_size: (80, 24),
                 input_sequence: VecDeque::new(),
-                search_highlights: Vec::new(),
                 is_initialized: false,
             }
         }
@@ -127,14 +118,6 @@ pub mod tests {
         fn get_terminal_size(&self) -> Result<(u16, u16)> {
             Ok(self.terminal_size)
         }
-
-        fn set_search_highlights(&mut self, line_highlights: &[(u64, Vec<(usize, usize)>)]) {
-            self.search_highlights = line_highlights.to_vec();
-        }
-
-        fn clear_search_highlights(&mut self) {
-            self.search_highlights.clear();
-        }
     }
 
     #[test]
@@ -165,13 +148,6 @@ pub mod tests {
         // Test terminal size
         let size = renderer.get_terminal_size().unwrap();
         assert_eq!(size, (80, 24));
-
-        // Test search highlights
-        renderer.set_search_highlights(&[(10, vec![(0, 5)])]);
-        assert_eq!(renderer.search_highlights.len(), 1);
-        renderer.clear_search_highlights();
-        assert_eq!(renderer.search_highlights.len(), 0);
-
         // Test cleanup
         renderer.cleanup().unwrap();
         assert!(!renderer.is_initialized);

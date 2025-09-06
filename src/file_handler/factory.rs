@@ -105,7 +105,7 @@ impl FileAccessorFactory {
                     e,
                 )
             })?;
-            let accessor = InMemoryFileAccessor::new(content);
+            let accessor = InMemoryFileAccessor::new(content, path.to_path_buf());
             Ok(Box::new(accessor))
         } else {
             // Large file: use memory mapping for memory efficiency
@@ -165,7 +165,10 @@ impl FileAccessorFactory {
                     e,
                 )
             })?;
-            Ok(Box::new(InMemoryFileAccessor::new(content)))
+            Ok(Box::new(InMemoryFileAccessor::new(
+                content,
+                path.to_path_buf(),
+            )))
         }
     }
 }

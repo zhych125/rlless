@@ -8,34 +8,6 @@ use crate::error::Result;
 use async_trait::async_trait;
 use std::borrow::Cow;
 
-/// Information about a search match in the file
-#[derive(Debug, Clone)]
-pub struct MatchInfo {
-    /// Line number where the match was found (0-based)
-    pub line_number: u64,
-
-    /// Byte offset from start of file where this line begins
-    /// Useful for seeking directly to this position
-    pub byte_offset: u64,
-
-    /// Full content of the line containing the match
-    /// Already converted to UTF-8 (lossy if needed)
-    /// Owned string since MatchInfo is typically consumed for highlighting/display
-    pub line_content: String,
-
-    /// Vector of (start, end) pairs for multiple matches in the same line
-    /// Each tuple represents a character range within the line for highlighting
-    pub match_ranges: Vec<(usize, usize)>,
-
-    /// Context lines before the match (if requested)
-    /// Used by search engine for grep-like context display
-    pub context_before: Vec<String>,
-
-    /// Context lines after the match (if requested)
-    /// Used by search engine for grep-like context display
-    pub context_after: Vec<String>,
-}
-
 /// Core trait for file access operations
 ///
 /// This trait provides a unified interface for both small files (loaded into memory)
@@ -88,7 +60,7 @@ pub trait FileAccessor: Send + Sync {
     /// * `search_fn` - Function that returns match ranges for a given line
     ///
     /// # Returns
-    /// * Some(MatchInfo) if matches found
+    /// * Some(line_number) if matches found
     /// * None if no matches found before EOF
     ///
     /// # Performance
@@ -102,7 +74,7 @@ pub trait FileAccessor: Send + Sync {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>>;
+    ) -> Result<Option<u64>>;
 
     /// Find previous occurrence using a search function searching backward from start_line
     ///
@@ -111,7 +83,7 @@ pub trait FileAccessor: Send + Sync {
     /// * `search_fn` - Function that returns match ranges for a given line
     ///
     /// # Returns
-    /// * Some(MatchInfo) if matches found
+    /// * Some(line_number) if matches found
     /// * None if no matches found before beginning of file
     ///
     /// # Performance
@@ -125,7 +97,7 @@ pub trait FileAccessor: Send + Sync {
         &self,
         start_line: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<MatchInfo>>;
+    ) -> Result<Option<u64>>;
 
     /// Get the total file size in bytes
     ///
@@ -152,6 +124,15 @@ pub trait FileAccessor: Send + Sync {
     /// # Usage
     /// Used for scroll bar positioning, jump to percentage, statistics
     fn total_lines(&self) -> Option<u64>;
+
+    /// Get the file path for this accessor
+    ///
+    /// # Returns
+    /// * Path to the file being accessed
+    ///
+    /// # Usage
+    /// Used for display purposes, error messages, and file operations like reload
+    fn file_path(&self) -> &std::path::Path;
 
     /// Check if this implementation supports parallel operations
     ///
@@ -189,6 +170,7 @@ pub mod tests {
     pub struct MockFileAccessor {
         lines: Vec<String>,
         file_size: u64,
+        file_path: std::path::PathBuf,
     }
 
     impl MockFileAccessor {
@@ -198,7 +180,11 @@ pub mod tests {
             let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
             let file_size = content.len() as u64;
 
-            Self { lines, file_size }
+            Self {
+                lines,
+                file_size,
+                file_path: std::path::PathBuf::from("/mock/test.txt"),
+            }
         }
 
         /// Create a mock accessor with specific lines
@@ -249,18 +235,11 @@ pub mod tests {
             &self,
             start_line: u64,
             search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-        ) -> Result<Option<MatchInfo>> {
+        ) -> Result<Option<u64>> {
             for (i, line) in self.lines.iter().enumerate().skip(start_line as usize) {
                 let match_ranges = search_fn(line);
                 if !match_ranges.is_empty() {
-                    return Ok(Some(MatchInfo {
-                        line_number: i as u64,
-                        byte_offset: 0, // Mock doesn't track byte offsets
-                        line_content: line.clone(),
-                        match_ranges,
-                        context_before: Vec::new(),
-                        context_after: Vec::new(),
-                    }));
+                    return Ok(Some(i as u64));
                 }
             }
             Ok(None)
@@ -270,7 +249,7 @@ pub mod tests {
             &self,
             start_line: u64,
             search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-        ) -> Result<Option<MatchInfo>> {
+        ) -> Result<Option<u64>> {
             if start_line == 0 {
                 return Ok(None);
             }
@@ -279,14 +258,7 @@ pub mod tests {
                 if let Some(line) = self.lines.get(i) {
                     let match_ranges = search_fn(line);
                     if !match_ranges.is_empty() {
-                        return Ok(Some(MatchInfo {
-                            line_number: i as u64,
-                            byte_offset: 0, // Mock doesn't track byte offsets
-                            line_content: line.clone(),
-                            match_ranges,
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        }));
+                        return Ok(Some(i as u64));
                     }
                 }
             }
@@ -299,6 +271,10 @@ pub mod tests {
 
         fn total_lines(&self) -> Option<u64> {
             Some(self.lines.len() as u64)
+        }
+
+        fn file_path(&self) -> &std::path::Path {
+            &self.file_path
         }
     }
 
@@ -424,18 +400,14 @@ pub mod tests {
         // Test finding from beginning
         let result = accessor.find_next_match(0, &pattern_search).await.unwrap();
         assert!(result.is_some());
-        let match_info = result.unwrap();
-        assert_eq!(match_info.line_number, 0);
-        assert_eq!(match_info.line_content, "First line with pattern");
-        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 0);
 
         // Test finding from middle
         let result = accessor.find_next_match(1, &pattern_search).await.unwrap();
         assert!(result.is_some());
-        let match_info = result.unwrap();
-        assert_eq!(match_info.line_number, 2);
-        assert_eq!(match_info.line_content, "Third line with pattern again");
-        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 2);
 
         // Test not found
         let no_match_search = |_line: &str| Vec::new();
@@ -468,17 +440,14 @@ pub mod tests {
         // Test finding backward from end
         let result = accessor.find_prev_match(3, &pattern_search).await.unwrap();
         assert!(result.is_some());
-        let match_info = result.unwrap();
-        assert_eq!(match_info.line_number, 2);
-        assert_eq!(match_info.line_content, "Third line with pattern again");
-        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 2);
 
         // Test finding backward from middle
         let result = accessor.find_prev_match(2, &pattern_search).await.unwrap();
         assert!(result.is_some());
-        let match_info = result.unwrap();
-        assert_eq!(match_info.line_number, 0);
-        assert_eq!(match_info.match_ranges, vec![(16, 23)]);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 0);
 
         // Test not found from beginning
         let result = accessor.find_prev_match(0, &pattern_search).await.unwrap();

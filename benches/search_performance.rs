@@ -417,7 +417,7 @@ fn bench_random_start_positions(c: &mut Criterion) {
         let temp_file = create_log_file_with_patterns(size_kb, pattern_frequency);
         let accessor =
             rt.block_on(async { FileAccessorFactory::create(temp_file.path()).await.unwrap() });
-        
+
         let size_label = if size_kb < 1024 {
             format!("{}KB", size_kb)
         } else {
@@ -427,7 +427,7 @@ fn bench_random_start_positions(c: &mut Criterion) {
         // Estimate line count based on file size (average ~60 chars per line)
         let file_size = accessor.file_size();
         let estimated_lines = (file_size / 60).max(100); // Minimum 100 lines for safety
-        
+
         let engine = RipgrepEngine::new(accessor.into());
 
         // Test 1: Random start literal search
@@ -439,10 +439,10 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 let mut rng = ChaCha8Rng::seed_from_u64(42); // Fixed seed for reproducibility
                 b.iter(|| {
                     // Generate random start position (avoid last 10% to ensure matches)
-                    let start_line = rng.gen_range(0..estimated_lines.saturating_sub(estimated_lines / 10));
-                    let result = rt.block_on(async {
-                        eng.search_from("timeout", start_line, &options).await
-                    });
+                    let start_line =
+                        rng.gen_range(0..estimated_lines.saturating_sub(estimated_lines / 10));
+                    let result = rt
+                        .block_on(async { eng.search_from("timeout", start_line, &options).await });
                     let _ = black_box(result);
                 });
             },
@@ -459,10 +459,15 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 };
                 let mut rng = ChaCha8Rng::seed_from_u64(43); // Different seed
                 b.iter(|| {
-                    let start_line = rng.gen_range(0..estimated_lines.saturating_sub(estimated_lines / 10));
+                    let start_line =
+                        rng.gen_range(0..estimated_lines.saturating_sub(estimated_lines / 10));
                     let result = rt.block_on(async {
-                        eng.search_from(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", start_line, &options)
-                            .await
+                        eng.search_from(
+                            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
+                            start_line,
+                            &options,
+                        )
+                        .await
                     });
                     let _ = black_box(result);
                 });
@@ -480,7 +485,8 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 };
                 let mut rng = ChaCha8Rng::seed_from_u64(44); // Different seed
                 b.iter(|| {
-                    let start_line = rng.gen_range(0..estimated_lines.saturating_sub(estimated_lines / 5));
+                    let start_line =
+                        rng.gen_range(0..estimated_lines.saturating_sub(estimated_lines / 5));
                     let result = rt.block_on(async {
                         eng.search_from(r"IPv4: 192\.168\.1\.\d{1,3}", start_line, &options)
                             .await
@@ -500,9 +506,8 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 b.iter(|| {
                     // For backward search, start from middle to end of file
                     let start_line = rng.gen_range(estimated_lines / 2..estimated_lines);
-                    let result = rt.block_on(async {
-                        eng.search_prev("timeout", start_line, &options).await
-                    });
+                    let result = rt
+                        .block_on(async { eng.search_prev("timeout", start_line, &options).await });
                     let _ = black_box(result);
                 });
             },
@@ -520,9 +525,8 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 let mut rng = ChaCha8Rng::seed_from_u64(46); // Different seed
                 b.iter(|| {
                     let start_line = rng.gen_range(estimated_lines / 4..3 * estimated_lines / 4);
-                    let result = rt.block_on(async {
-                        eng.search_from("ERROR", start_line, &options).await
-                    });
+                    let result =
+                        rt.block_on(async { eng.search_from("ERROR", start_line, &options).await });
                     let _ = black_box(result);
                 });
             },
