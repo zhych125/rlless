@@ -25,13 +25,6 @@ async fn main() -> Result<()> {
                 .required(true)
                 .index(1),
         )
-        .arg(
-            Arg::new("version")
-                .short('V')
-                .long("version")
-                .help("Print version information")
-                .action(clap::ArgAction::Version),
-        )
         .get_matches();
 
     // Get the file path argument

@@ -80,7 +80,7 @@ impl<'a> ViewState<'a> {
     /// Scroll viewport by the given number of lines
     pub fn scroll_by(&mut self, lines: i64) {
         if lines > 0 {
-            self.viewport_top = self.viewport_top.saturating_add(lines as u64);
+            self.viewport_top += lines as u64;
         } else {
             self.viewport_top = self.viewport_top.saturating_sub((-lines) as u64);
         }
@@ -145,7 +145,7 @@ pub struct StatusLine {
     pub mode: DisplayMode,
     pub message: Option<String>,
     pub position: PositionInfo,
-    pub search_info: Option<String>, // Provided by SearchEngine, not managed here
+    pub search_prompt: Option<(SearchDirection, String)>,
 }
 
 impl Default for StatusLine {
@@ -154,7 +154,7 @@ impl Default for StatusLine {
             mode: DisplayMode::Normal,
             message: None,
             position: PositionInfo::default(),
-            search_info: None,
+            search_prompt: None,
         }
     }
 }
@@ -176,12 +176,7 @@ impl StatusLine {
     }
 
     /// Update position information
-    pub fn update_position(
-        &mut self,
-        current_line: u64,
-        total_lines: Option<u64>,
-        byte_offset: u64,
-    ) {
+    pub fn update_position(&mut self, current_line: u64, total_lines: Option<u64>) {
         self.position = PositionInfo {
             current_line,
             total_lines,
@@ -189,8 +184,44 @@ impl StatusLine {
                 Some(total) if total > 0 => (current_line + 1) as f32 / total as f32,
                 _ => 0.0,
             },
-            byte_offset,
         };
+    }
+
+    /// Format the status line content (position and message only)
+    pub fn format_status_content(&self) -> String {
+        if let Some(ref message) = self.message {
+            // Show message (like "Pattern not found") when available
+            format!("{} | {}", self.position.format_position(), message)
+        } else {
+            // Just position info
+            self.position.format_position()
+        }
+    }
+
+    /// Set search prompt for input mode
+    pub fn set_search_prompt(&mut self, direction: SearchDirection) {
+        self.search_prompt = Some((direction, String::new()));
+    }
+
+    /// Update search prompt with current buffer
+    pub fn update_search_prompt(&mut self, direction: SearchDirection, buffer: String) {
+        self.search_prompt = Some((direction, buffer));
+    }
+
+    /// Clear search prompt and return to normal mode
+    pub fn clear_search_prompt(&mut self) {
+        self.search_prompt = None;
+    }
+
+    /// Format the complete status line for display
+    pub fn format_status_line(&self, filename: &str) -> String {
+        if let Some((direction, buffer)) = &self.search_prompt {
+            // Show search prompt: "/search_term"
+            format!("{}{}", direction.to_char(), buffer)
+        } else {
+            // Normal status line: "filename | position | message"
+            format!("{} | {}", filename, self.format_status_content())
+        }
     }
 }
 
@@ -227,7 +258,6 @@ pub struct PositionInfo {
     pub current_line: u64,
     pub total_lines: Option<u64>,
     pub percentage: f32,
-    pub byte_offset: u64,
 }
 
 impl Default for PositionInfo {
@@ -236,7 +266,6 @@ impl Default for PositionInfo {
             current_line: 0,
             total_lines: None,
             percentage: 0.0,
-            byte_offset: 0,
         }
     }
 }
@@ -471,7 +500,6 @@ mod tests {
             current_line: 49,
             total_lines: Some(100),
             percentage: 0.5,
-            byte_offset: 1024,
         };
 
         assert_eq!(pos.format_position(), "Line 50/100 (50%)");
@@ -480,7 +508,6 @@ mod tests {
             current_line: 0,
             total_lines: Some(0),
             percentage: 0.0,
-            byte_offset: 0,
         };
         assert_eq!(empty_pos.format_position(), "Empty");
 
@@ -488,7 +515,6 @@ mod tests {
             current_line: 49,
             total_lines: None,
             percentage: 0.0,
-            byte_offset: 1024,
         };
         assert_eq!(unknown_total_pos.format_position(), "Line 50 (?)");
 
@@ -496,7 +522,6 @@ mod tests {
             current_line: 100,
             total_lines: Some(100),
             percentage: 1.0,
-            byte_offset: 2048,
         };
         assert_eq!(end_pos.format_position(), "END");
     }
@@ -507,27 +532,27 @@ mod tests {
 
         // Test percentage calculation for different positions
         // Line 1 of 10 should be 10%
-        status_line.update_position(0, Some(10), 0);
+        status_line.update_position(0, Some(10));
         assert_eq!(status_line.position.percentage, 0.1);
         assert_eq!(status_line.position.format_position(), "Line 1/10 (10%)");
 
         // Line 5 of 10 should be 50%
-        status_line.update_position(4, Some(10), 0);
+        status_line.update_position(4, Some(10));
         assert_eq!(status_line.position.percentage, 0.5);
         assert_eq!(status_line.position.format_position(), "Line 5/10 (50%)");
 
         // Line 10 of 10 should be 100%
-        status_line.update_position(9, Some(10), 0);
+        status_line.update_position(9, Some(10));
         assert_eq!(status_line.position.percentage, 1.0);
         assert_eq!(status_line.position.format_position(), "Line 10/10 (100%)");
 
         // Edge case: single line file
-        status_line.update_position(0, Some(1), 0);
+        status_line.update_position(0, Some(1));
         assert_eq!(status_line.position.percentage, 1.0);
         assert_eq!(status_line.position.format_position(), "Line 1/1 (100%)");
 
         // Edge case: zero lines (should not crash)
-        status_line.update_position(0, Some(0), 0);
+        status_line.update_position(0, Some(0));
         assert_eq!(status_line.position.percentage, 0.0);
         assert_eq!(status_line.position.format_position(), "Empty");
     }

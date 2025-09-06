@@ -4,7 +4,7 @@
 //! and handling user input events in an event-driven architecture.
 
 use crate::error::Result;
-use crate::ui::{UICommand, ViewState};
+use crate::ui::{InputAction, ViewState};
 use std::time::Duration;
 
 /// Core trait for UI rendering and event handling
@@ -18,14 +18,14 @@ pub trait UIRenderer {
     /// - Handle terminal resizing
     fn render(&mut self, view_state: &ViewState) -> Result<()>;
 
-    /// Handle user input and return the next UI command
+    /// Handle user input and return the next input action
     ///
     /// This method should:
     /// - Block until user input or timeout
-    /// - Parse key combinations into UICommands
+    /// - Parse key combinations into InputActions
     /// - Handle mode-specific input (search input vs navigation)
     /// - Return None on timeout for periodic updates
-    fn handle_input(&mut self, timeout: Option<Duration>) -> Result<Option<UICommand>>;
+    fn handle_input(&mut self, timeout: Option<Duration>) -> Result<Option<InputAction>>;
 
     /// Initialize the terminal UI
     ///
@@ -51,7 +51,7 @@ pub trait UIRenderer {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::ui::{NavigationCommand, UICommand};
+    use crate::ui::InputAction;
     use std::collections::VecDeque;
 
     /// Mock UI renderer for testing
@@ -63,7 +63,7 @@ pub mod tests {
     pub struct MockUIRenderer {
         pub render_count: usize,
         pub terminal_size: (u16, u16),
-        pub input_sequence: VecDeque<UICommand>,
+        pub input_sequence: VecDeque<InputAction>,
         pub is_initialized: bool,
     }
 
@@ -85,8 +85,8 @@ pub mod tests {
         }
 
         /// Add a command to the input sequence for testing
-        pub fn add_input(&mut self, command: UICommand) {
-            self.input_sequence.push_back(command);
+        pub fn add_input(&mut self, action: InputAction) {
+            self.input_sequence.push_back(action);
         }
 
         /// Set terminal size for testing
@@ -101,7 +101,7 @@ pub mod tests {
             Ok(())
         }
 
-        fn handle_input(&mut self, _timeout: Option<Duration>) -> Result<Option<UICommand>> {
+        fn handle_input(&mut self, _timeout: Option<Duration>) -> Result<Option<InputAction>> {
             Ok(self.input_sequence.pop_front())
         }
 
@@ -138,12 +138,9 @@ pub mod tests {
         assert_eq!(renderer.render_count, 1);
 
         // Test input simulation
-        renderer.add_input(UICommand::Navigation(NavigationCommand::LineDown(1)));
+        renderer.add_input(InputAction::ScrollDown(1));
         let cmd = renderer.handle_input(None).unwrap();
-        assert_eq!(
-            cmd,
-            Some(UICommand::Navigation(NavigationCommand::LineDown(1)))
-        );
+        assert_eq!(cmd, Some(InputAction::ScrollDown(1)));
 
         // Test terminal size
         let size = renderer.get_terminal_size().unwrap();
@@ -158,20 +155,23 @@ pub mod tests {
         let mut renderer = MockUIRenderer::new();
 
         // Add multiple commands
-        renderer.add_input(UICommand::Navigation(NavigationCommand::PageDown));
-        renderer.add_input(UICommand::Navigation(NavigationCommand::GoToEnd));
-        renderer.add_input(UICommand::Quit);
+        renderer.add_input(InputAction::PageDown);
+        renderer.add_input(InputAction::GoToEnd);
+        renderer.add_input(InputAction::Quit);
 
         // Verify they come out in order
         assert_eq!(
             renderer.handle_input(None).unwrap(),
-            Some(UICommand::Navigation(NavigationCommand::PageDown))
+            Some(InputAction::PageDown)
         );
         assert_eq!(
             renderer.handle_input(None).unwrap(),
-            Some(UICommand::Navigation(NavigationCommand::GoToEnd))
+            Some(InputAction::GoToEnd)
         );
-        assert_eq!(renderer.handle_input(None).unwrap(), Some(UICommand::Quit));
+        assert_eq!(
+            renderer.handle_input(None).unwrap(),
+            Some(InputAction::Quit)
+        );
         assert_eq!(renderer.handle_input(None).unwrap(), None);
     }
 }

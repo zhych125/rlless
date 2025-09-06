@@ -6,7 +6,7 @@
 use crate::error::Result;
 use crate::file_handler::{FileAccessor, FileAccessorFactory};
 use crate::search::{RipgrepEngine, SearchEngine, SearchOptions};
-use crate::ui::{UICommand, UIRenderer, ViewState};
+use crate::ui::{InputAction, SearchDirection, UIRenderer, ViewState, ViewportInfo};
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ pub struct Application {
 /// Minimal search state for less-like navigation
 struct SearchState {
     pattern: String,
+    direction: SearchDirection,
     options: SearchOptions,
     last_found_line: Option<u64>,
 }
@@ -63,8 +64,8 @@ impl Application {
                 .ui_renderer
                 .handle_input(Some(Duration::from_millis(50)))
             {
-                Ok(Some(command)) => {
-                    running = self.execute_command(command, &mut view_state).await?;
+                Ok(Some(action)) => {
+                    running = self.execute_action(action, &mut view_state).await?;
                 }
                 Ok(None) => {
                     // No input - continue
@@ -86,195 +87,236 @@ impl Application {
         Ok(())
     }
 
-    /// Execute a command - returns false if should quit
-    async fn execute_command(
+    /// Execute an action - returns false if should quit
+    async fn execute_action(
         &mut self,
-        command: UICommand,
+        action: InputAction,
         view_state: &mut ViewState<'_>,
     ) -> Result<bool> {
         use crate::search::SearchOptions;
-        use crate::ui::{DisplayCommand, FileCommand, NavigationCommand, SearchCommand};
 
-        match command {
-            UICommand::Quit => Ok(false),
+        match action {
+            InputAction::Quit => Ok(false),
 
-            UICommand::Navigation(nav) => {
-                // Handle navigation inline to avoid lifetime issues
-                match nav {
-                    NavigationCommand::LineUp(n) => {
-                        let new_line = view_state.cursor_line.saturating_sub(n);
-                        view_state.move_cursor_to(new_line);
-                    }
-                    NavigationCommand::LineDown(n) => {
-                        view_state.move_cursor_to(view_state.cursor_line + n);
-                    }
-                    NavigationCommand::PageUp => {
-                        let page_size = view_state.viewport_info.lines_per_page();
-                        let new_line = view_state.cursor_line.saturating_sub(page_size);
-                        view_state.move_cursor_to(new_line);
-                    }
-                    NavigationCommand::PageDown => {
-                        let page_size = view_state.viewport_info.lines_per_page();
-                        view_state.move_cursor_to(view_state.cursor_line + page_size);
-                    }
-                    NavigationCommand::GoToStart => {
-                        view_state.move_cursor_to(0);
-                    }
-                    NavigationCommand::GoToEnd => {
-                        if let Some(total) = self.file_accessor.total_lines() {
-                            view_state.move_cursor_to(total.saturating_sub(1));
-                        }
-                    }
-                    NavigationCommand::GoToLine(line) => {
-                        view_state.move_cursor_to(line);
-                    }
-                    _ => {} // Other nav commands
-                }
-                // Update content once for all navigation commands
+            // Navigation actions - immediate viewport scrolling (less-like behavior)
+            InputAction::ScrollUp(n) => {
+                view_state.viewport_top = view_state.viewport_top.saturating_sub(n);
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::ScrollDown(n) => {
+                let max_top = self.calculate_max_viewport_top(&view_state.viewport_info);
+                view_state.viewport_top = (view_state.viewport_top + n).min(max_top);
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::PageUp => {
+                let page_size = view_state.viewport_info.lines_per_page();
+                view_state.viewport_top = view_state.viewport_top.saturating_sub(page_size);
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::PageDown => {
+                let page_size = view_state.viewport_info.lines_per_page();
+                let max_top = self.calculate_max_viewport_top(&view_state.viewport_info);
+                view_state.viewport_top = (view_state.viewport_top + page_size).min(max_top);
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::GoToStart => {
+                view_state.viewport_top = 0;
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::GoToEnd => {
+                view_state.viewport_top =
+                    self.calculate_max_viewport_top(&view_state.viewport_info);
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
                 Ok(true)
             }
 
-            UICommand::Search(search_cmd) => {
-                match search_cmd {
-                    SearchCommand::SearchPattern(pattern) => {
-                        let options = SearchOptions::default();
-                        let current_line = view_state.cursor_line;
+            // Search actions
+            InputAction::StartSearch(direction) => {
+                // Set search prompt in status line to show user is in search mode
+                view_state.status_line.set_search_prompt(direction);
+                Ok(true)
+            }
+            InputAction::UpdateSearchBuffer { direction, buffer } => {
+                // Update search prompt with current buffer as user types
+                view_state
+                    .status_line
+                    .update_search_prompt(direction, buffer);
+                Ok(true)
+            }
+            InputAction::CancelSearch => {
+                // Clear search prompt and return to normal display
+                view_state.status_line.clear_search_prompt();
+                view_state.status_line.message = None; // Clear any search messages
+                Ok(true)
+            }
+            InputAction::ExecuteSearch { pattern, direction } => {
+                // Less-like search: enable regex mode (default has regex_mode: false)
+                let options = SearchOptions {
+                    regex_mode: true, // Less treats patterns as basic regex
+                    ..Default::default()
+                };
+                let current_line = view_state.viewport_top;
 
-                        // Search from current position (less-like behavior)
-                        match self
-                            .search_engine
+                // Search from current viewport position (less-like behavior)
+                let search_result = match direction {
+                    SearchDirection::Forward => {
+                        self.search_engine
                             .search_from(&pattern, current_line, &options)
                             .await
-                        {
-                            Ok(Some(line_number)) => {
-                                // Store search state
-                                self.search_state = Some(SearchState {
-                                    pattern: pattern.clone(),
-                                    options,
-                                    last_found_line: Some(line_number),
-                                });
-
-                                // Jump to match
-                                view_state.move_cursor_to(line_number);
-                                view_state.status_line.search_info = None; // No status message like less
-                            }
-                            Ok(None) => {
-                                self.search_state = None;
-                                view_state.status_line.message =
-                                    Some("Pattern not found".to_string());
-                                view_state.status_line.search_info = None;
-                            }
-                            Err(e) => {
-                                self.search_state = None;
-                                view_state.status_line.message =
-                                    Some(format!("Search failed: {}", e));
-                                view_state.status_line.search_info = None;
-                            }
-                        }
                     }
-                    SearchCommand::NextMatch => {
-                        if let Some(ref mut search) = self.search_state {
-                            let start_line = search
-                                .last_found_line
-                                .map_or(view_state.cursor_line, |line| line + 1);
+                    SearchDirection::Backward => {
+                        self.search_engine
+                            .search_prev(&pattern, current_line, &options)
+                            .await
+                    }
+                };
 
-                            match self
-                                .search_engine
+                match search_result {
+                    Ok(Some(line_number)) => {
+                        // Store search state
+                        self.search_state = Some(SearchState {
+                            pattern: pattern.clone(),
+                            direction,
+                            options,
+                            last_found_line: Some(line_number),
+                        });
+
+                        // Center the match in viewport (less-like behavior)
+                        let page_size = view_state.viewport_info.lines_per_page();
+                        view_state.viewport_top = line_number.saturating_sub(page_size / 2);
+
+                        // Clear search prompt and messages - search completed successfully
+                        view_state.status_line.clear_search_prompt();
+                        view_state.status_line.message = None;
+                    }
+                    Ok(None) => {
+                        self.search_state = None;
+
+                        // Clear search prompt and show error message
+                        view_state.status_line.clear_search_prompt();
+                        view_state.status_line.message = Some("Pattern not found".to_string());
+                    }
+                    Err(e) => {
+                        self.search_state = None;
+
+                        // Clear search prompt and show error message
+                        view_state.status_line.clear_search_prompt();
+                        view_state.status_line.message = Some(format!("Search failed: {}", e));
+                    }
+                }
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::NextMatch => {
+                if let Some(ref mut search) = self.search_state {
+                    let start_line = search
+                        .last_found_line
+                        .map_or(view_state.viewport_top, |line| line + 1);
+
+                    let search_result = match search.direction {
+                        SearchDirection::Forward => {
+                            self.search_engine
                                 .search_from(&search.pattern, start_line, &search.options)
                                 .await
-                            {
-                                Ok(Some(line_number)) => {
-                                    search.last_found_line = Some(line_number);
-                                    view_state.move_cursor_to(line_number);
-                                    view_state.status_line.search_info = None; // No status message like less
-                                }
-                                Ok(None) => {
-                                    view_state.status_line.message =
-                                        Some("Pattern not found".to_string());
-                                }
-                                Err(e) => {
-                                    view_state.status_line.message =
-                                        Some(format!("Search error: {}", e));
-                                }
-                            }
-                        } else {
-                            view_state.status_line.message = Some("No active search".to_string());
                         }
-                    }
-                    SearchCommand::PreviousMatch => {
-                        if let Some(ref mut search) = self.search_state {
-                            let start_line =
-                                search.last_found_line.unwrap_or(view_state.cursor_line);
-
-                            match self
-                                .search_engine
+                        SearchDirection::Backward => {
+                            self.search_engine
                                 .search_prev(&search.pattern, start_line, &search.options)
                                 .await
-                            {
-                                Ok(Some(line_number)) => {
-                                    search.last_found_line = Some(line_number);
-                                    view_state.move_cursor_to(line_number);
-                                    view_state.status_line.search_info = None; // No status message like less
-                                }
-                                Ok(None) => {
-                                    view_state.status_line.message =
-                                        Some("Pattern not found".to_string());
-                                }
-                                Err(e) => {
-                                    view_state.status_line.message =
-                                        Some(format!("Search error: {}", e));
-                                }
-                            }
-                        } else {
-                            view_state.status_line.message = Some("No active search".to_string());
+                        }
+                    };
+
+                    match search_result {
+                        Ok(Some(line_number)) => {
+                            search.last_found_line = Some(line_number);
+                            // Center match in viewport
+                            let page_size = view_state.viewport_info.lines_per_page();
+                            view_state.viewport_top = line_number.saturating_sub(page_size / 2);
+                        }
+                        Ok(None) => {
+                            view_state.status_line.message = Some("Pattern not found".to_string());
+                        }
+                        Err(e) => {
+                            view_state.status_line.message = Some(format!("Search error: {}", e));
                         }
                     }
-                    SearchCommand::ClearSearch => {
-                        self.search_state = None;
-                        view_state.status_line.search_info = None;
-                    }
-                    _ => {} // Other search commands
+                } else {
+                    view_state.status_line.message = Some("No active search".to_string());
                 }
-                // Update content once for all search commands
+                self.update_view_content(view_state, self.search_state.is_some())
+                    .await?;
+                Ok(true)
+            }
+            InputAction::PreviousMatch => {
+                if let Some(ref mut search) = self.search_state {
+                    let start_line = search.last_found_line.unwrap_or(view_state.viewport_top);
+
+                    // Reverse the search direction for "previous"
+                    let search_result = match search.direction {
+                        SearchDirection::Forward => {
+                            self.search_engine
+                                .search_prev(&search.pattern, start_line, &search.options)
+                                .await
+                        }
+                        SearchDirection::Backward => {
+                            self.search_engine
+                                .search_from(&search.pattern, start_line, &search.options)
+                                .await
+                        }
+                    };
+
+                    match search_result {
+                        Ok(Some(line_number)) => {
+                            search.last_found_line = Some(line_number);
+                            // Center match in viewport
+                            let page_size = view_state.viewport_info.lines_per_page();
+                            view_state.viewport_top = line_number.saturating_sub(page_size / 2);
+                        }
+                        Ok(None) => {
+                            view_state.status_line.message = Some("Pattern not found".to_string());
+                        }
+                        Err(e) => {
+                            view_state.status_line.message = Some(format!("Search error: {}", e));
+                        }
+                    }
+                } else {
+                    view_state.status_line.message = Some("No active search".to_string());
+                }
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
                 Ok(true)
             }
 
-            UICommand::Display(display) => {
-                match display {
-                    DisplayCommand::ToggleLineNumbers => {
-                        view_state.display_config.show_line_numbers =
-                            !view_state.display_config.show_line_numbers;
-                    }
-                    DisplayCommand::ToggleWordWrap => {
-                        view_state.display_config.wrap_lines =
-                            !view_state.display_config.wrap_lines;
-                    }
-                    _ => {} // Other display commands
-                }
-                // Update content once for all display commands
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+            // Other actions - simplified for essential functionality only
+            InputAction::NoAction => Ok(true),
+            InputAction::InvalidInput => {
+                // Just ignore invalid input - no error message needed
                 Ok(true)
             }
+        }
+    }
 
-            UICommand::File(file_cmd) => {
-                if file_cmd == FileCommand::ReloadFile {
-                    let file_path = self.file_accessor.file_path();
-                    self.file_accessor = Arc::from(FileAccessorFactory::create(file_path).await?);
-                    self.search_engine = RipgrepEngine::new(Arc::clone(&self.file_accessor));
-                    self.search_state = None; // Clear search state on reload
-                    view_state.status_line.search_info = None;
-                    view_state.status_line.message = Some("File reloaded".to_string());
-                }
-                // Update content once for all file commands
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
-                Ok(true)
-            }
+    /// Calculate the maximum viewport top position
+    fn calculate_max_viewport_top(&self, viewport_info: &ViewportInfo) -> u64 {
+        if let Some(total_lines) = self.file_accessor.total_lines() {
+            let page_size = viewport_info.lines_per_page();
+            total_lines.saturating_sub(page_size)
+        } else {
+            // For large files without known total, allow scrolling to very large position
+            // The file accessor will handle EOF gracefully
+            u64::MAX - viewport_info.lines_per_page()
         }
     }
 
@@ -333,12 +375,10 @@ impl Application {
             view_state.clear_search_highlights();
         }
 
-        // Update position info using the proper method to recalculate percentage
-        view_state.status_line.update_position(
-            view_state.cursor_line,
-            self.file_accessor.total_lines(),
-            0, // TODO: Calculate actual byte offset if needed
-        );
+        // Update position info - use viewport_top instead of cursor_line (we removed cursor)
+        view_state
+            .status_line
+            .update_position(view_state.viewport_top, self.file_accessor.total_lines());
 
         Ok(())
     }

@@ -5,11 +5,9 @@
 //! and SearchEngine components rather than managing data itself.
 
 use crate::error::Result;
-use crate::ui::{
-    ColorTheme, NavigationCommand, SearchCommand, SearchDirection, UICommand, UIRenderer, ViewState,
-};
+use crate::ui::{ColorTheme, InputAction, InputStateMachine, UIRenderer, ViewState};
 use ratatui::crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -33,6 +31,7 @@ type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 pub struct TerminalUI {
     terminal: Option<CrosstermTerminal>,
     theme: ColorTheme,
+    input_machine: InputStateMachine,
 }
 
 impl TerminalUI {
@@ -41,6 +40,7 @@ impl TerminalUI {
         Ok(Self {
             terminal: None,
             theme: ColorTheme::default(),
+            input_machine: InputStateMachine::new(),
         })
     }
 
@@ -49,60 +49,8 @@ impl TerminalUI {
         Ok(Self {
             terminal: None,
             theme,
+            input_machine: InputStateMachine::new(),
         })
-    }
-
-    /// Convert UI key events to UICommands
-    fn key_to_command(&self, key: KeyCode, modifiers: KeyModifiers) -> Option<UICommand> {
-        match (key, modifiers) {
-            // Navigation commands
-            (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
-                Some(UICommand::Navigation(NavigationCommand::LineDown(1)))
-            }
-            (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
-                Some(UICommand::Navigation(NavigationCommand::LineUp(1)))
-            }
-            (KeyCode::Char('f'), KeyModifiers::NONE)
-            | (KeyCode::PageDown, _)
-            | (KeyCode::Char(' '), KeyModifiers::NONE) => {
-                Some(UICommand::Navigation(NavigationCommand::PageDown))
-            }
-            (KeyCode::Char('b'), KeyModifiers::NONE) | (KeyCode::PageUp, _) => {
-                Some(UICommand::Navigation(NavigationCommand::PageUp))
-            }
-            (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                Some(UICommand::Navigation(NavigationCommand::HalfPageDown))
-            }
-            (KeyCode::Char('u'), KeyModifiers::NONE) => {
-                Some(UICommand::Navigation(NavigationCommand::HalfPageUp))
-            }
-            (KeyCode::Char('g'), KeyModifiers::NONE) | (KeyCode::Home, _) => {
-                Some(UICommand::Navigation(NavigationCommand::GoToStart))
-            }
-            (KeyCode::Char('G'), KeyModifiers::SHIFT) | (KeyCode::End, _) => {
-                Some(UICommand::Navigation(NavigationCommand::GoToEnd))
-            }
-
-            // Search commands
-            (KeyCode::Char('/'), KeyModifiers::NONE) => Some(UICommand::Search(
-                SearchCommand::StartSearch(SearchDirection::Forward),
-            )),
-            (KeyCode::Char('?'), KeyModifiers::NONE) => Some(UICommand::Search(
-                SearchCommand::StartSearch(SearchDirection::Backward),
-            )),
-            (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                Some(UICommand::Search(SearchCommand::NextMatch))
-            }
-            (KeyCode::Char('N'), KeyModifiers::SHIFT) => {
-                Some(UICommand::Search(SearchCommand::PreviousMatch))
-            }
-
-            // Quit commands
-            (KeyCode::Char('q'), KeyModifiers::NONE)
-            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(UICommand::Quit),
-
-            _ => None,
-        }
     }
 
     /// Render content area with search highlights (helper for closure)
@@ -174,12 +122,9 @@ impl TerminalUI {
         view_state: &ViewState,
         theme: &ColorTheme,
     ) {
-        let status_text = format!(
-            "{} | {} | {}",
-            view_state.file_info.filename(),
-            view_state.status_line.position.format_position(),
-            view_state.status_line.search_info.as_deref().unwrap_or("")
-        );
+        let status_text = view_state
+            .status_line
+            .format_status_line(&view_state.file_info.filename());
 
         // Use theme colors for status line directly
         let status_style = Style::default().bg(theme.status_bg).fg(theme.status_fg);
@@ -214,12 +159,17 @@ impl UIRenderer for TerminalUI {
         Ok(())
     }
 
-    fn handle_input(&mut self, timeout: Option<Duration>) -> Result<Option<UICommand>> {
+    fn handle_input(&mut self, timeout: Option<Duration>) -> Result<Option<InputAction>> {
         let timeout_duration = timeout.unwrap_or(Duration::from_millis(100));
 
         if event::poll(timeout_duration)? {
             if let Event::Key(key_event) = event::read()? {
-                return Ok(self.key_to_command(key_event.code, key_event.modifiers));
+                let action = self.input_machine.handle_key_event(key_event);
+                // Only return non-NoAction results
+                return Ok(match action {
+                    InputAction::NoAction => None,
+                    other => Some(other),
+                });
             }
         }
 
@@ -293,67 +243,13 @@ mod tests {
     }
 
     #[test]
-    fn test_key_to_command_navigation() {
+    fn test_input_state_machine_integration() {
+        use crate::ui::InputState;
+
         let ui = TerminalUI::new().unwrap();
 
-        // Test basic navigation
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('j'), KeyModifiers::NONE),
-            Some(UICommand::Navigation(NavigationCommand::LineDown(1)))
-        );
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('k'), KeyModifiers::NONE),
-            Some(UICommand::Navigation(NavigationCommand::LineUp(1)))
-        );
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char(' '), KeyModifiers::NONE),
-            Some(UICommand::Navigation(NavigationCommand::PageDown))
-        );
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('G'), KeyModifiers::SHIFT),
-            Some(UICommand::Navigation(NavigationCommand::GoToEnd))
-        );
-    }
-
-    #[test]
-    fn test_key_to_command_search() {
-        let ui = TerminalUI::new().unwrap();
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('/'), KeyModifiers::NONE),
-            Some(UICommand::Search(SearchCommand::StartSearch(
-                SearchDirection::Forward
-            )))
-        );
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('?'), KeyModifiers::NONE),
-            Some(UICommand::Search(SearchCommand::StartSearch(
-                SearchDirection::Backward
-            )))
-        );
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('n'), KeyModifiers::NONE),
-            Some(UICommand::Search(SearchCommand::NextMatch))
-        );
-    }
-
-    #[test]
-    fn test_key_to_command_quit() {
-        let ui = TerminalUI::new().unwrap();
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('q'), KeyModifiers::NONE),
-            Some(UICommand::Quit)
-        );
-
-        assert_eq!(
-            ui.key_to_command(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            Some(UICommand::Quit)
-        );
+        // Test that input state machine is properly initialized
+        assert_eq!(ui.input_machine.get_state(), InputState::Navigation);
+        assert_eq!(ui.input_machine.get_search_buffer(), "");
     }
 }
