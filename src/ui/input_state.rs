@@ -3,7 +3,7 @@
 //! This module implements a minimal state machine that processes keyboard input
 //! and generates actions for the application. It focuses only on essential less commands.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 /// Current input state
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,32 +84,79 @@ impl InputStateMachine {
             return InputAction::NoAction;
         }
 
-        match (self.state, key_event.code) {
+        match (self.state, key_event.code, key_event.modifiers) {
             // NAVIGATION STATE - Essential less commands only
-            (InputState::Navigation, KeyCode::Char('j')) => InputAction::ScrollDown(1),
-            (InputState::Navigation, KeyCode::Down) => InputAction::ScrollDown(1),
-            (InputState::Navigation, KeyCode::Char('k')) => InputAction::ScrollUp(1),
-            (InputState::Navigation, KeyCode::Up) => InputAction::ScrollUp(1),
-            (InputState::Navigation, KeyCode::Char(' ')) => InputAction::PageDown,
-            (InputState::Navigation, KeyCode::Char('f')) => InputAction::PageDown,
-            (InputState::Navigation, KeyCode::PageDown) => InputAction::PageDown,
-            (InputState::Navigation, KeyCode::Char('b')) => InputAction::PageUp,
-            (InputState::Navigation, KeyCode::PageUp) => InputAction::PageUp,
-            (InputState::Navigation, KeyCode::Char('g')) => InputAction::GoToStart,
-            (InputState::Navigation, KeyCode::Char('G')) => InputAction::GoToEnd,
-            (InputState::Navigation, KeyCode::Char('q')) => InputAction::Quit,
-            (InputState::Navigation, KeyCode::Char('n')) => InputAction::NextMatch,
-            (InputState::Navigation, KeyCode::Char('N')) => InputAction::PreviousMatch,
+            (InputState::Navigation, KeyCode::Char('j'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::ScrollDown(1)
+            }
+            (InputState::Navigation, KeyCode::Down, _) => InputAction::ScrollDown(1),
+            (InputState::Navigation, KeyCode::Char('k'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::ScrollUp(1)
+            }
+            (InputState::Navigation, KeyCode::Up, _) => InputAction::ScrollUp(1),
+            (InputState::Navigation, KeyCode::Char(' '), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::PageDown
+            }
+            (InputState::Navigation, KeyCode::Char('f'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::PageDown
+            }
+            (InputState::Navigation, KeyCode::PageDown, _) => InputAction::PageDown,
+            (InputState::Navigation, KeyCode::Char('b'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::PageUp
+            }
+            (InputState::Navigation, KeyCode::PageUp, _) => InputAction::PageUp,
+            (InputState::Navigation, KeyCode::Char('g'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::GoToStart
+            }
+            (InputState::Navigation, KeyCode::Char('G'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::GoToEnd
+            }
+            (InputState::Navigation, KeyCode::Char('q'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::Quit
+            }
+            (InputState::Navigation, KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                InputAction::Quit
+            }
+            (InputState::Navigation, KeyCode::Char('n'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::NextMatch
+            }
+            (InputState::Navigation, KeyCode::Char('N'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                InputAction::PreviousMatch
+            }
 
             // Enter search modes
-            (InputState::Navigation, KeyCode::Char('/')) => {
+            (InputState::Navigation, KeyCode::Char('/'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 self.state = InputState::SearchInput {
                     direction: SearchDirection::Forward,
                 };
                 self.search_buffer.clear();
                 InputAction::StartSearch(SearchDirection::Forward)
             }
-            (InputState::Navigation, KeyCode::Char('?')) => {
+            (InputState::Navigation, KeyCode::Char('?'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 self.state = InputState::SearchInput {
                     direction: SearchDirection::Backward,
                 };
@@ -118,8 +165,28 @@ impl InputStateMachine {
             }
 
             // SEARCH INPUT STATE
-            (InputState::SearchInput { direction }, KeyCode::Char(ch))
-                if ch.is_ascii_graphic() || ch == ' ' =>
+            // Ctrl+C in search mode - cancel search and return to navigation
+            (
+                InputState::SearchInput { direction: _ },
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ) => {
+                self.state = InputState::Navigation;
+                self.search_buffer.clear();
+                InputAction::CancelSearch
+            }
+            // Handle ':' in empty search - return to navigation (less command mode behavior)
+            (InputState::SearchInput { direction: _ }, KeyCode::Char(':'), modifiers)
+                if self.search_buffer.is_empty()
+                    && !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.state = InputState::Navigation;
+                self.search_buffer.clear();
+                InputAction::CancelSearch
+            }
+            (InputState::SearchInput { direction }, KeyCode::Char(ch), modifiers)
+                if (ch.is_ascii_graphic() || ch == ' ')
+                    && !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.search_buffer.push(ch);
                 InputAction::UpdateSearchBuffer {
@@ -127,20 +194,33 @@ impl InputStateMachine {
                     buffer: self.search_buffer.clone(),
                 }
             }
-            (InputState::SearchInput { direction }, KeyCode::Backspace) => {
+            (InputState::SearchInput { direction }, KeyCode::Backspace, _) => {
                 self.search_buffer.pop();
-                InputAction::UpdateSearchBuffer {
-                    direction,
-                    buffer: self.search_buffer.clone(),
+
+                // If buffer is now empty, return to navigation mode
+                if self.search_buffer.is_empty() {
+                    self.state = InputState::Navigation;
+                    InputAction::CancelSearch
+                } else {
+                    InputAction::UpdateSearchBuffer {
+                        direction,
+                        buffer: self.search_buffer.clone(),
+                    }
                 }
             }
-            (InputState::SearchInput { direction }, KeyCode::Enter) => {
+            (InputState::SearchInput { direction }, KeyCode::Enter, _) => {
                 let pattern = self.search_buffer.clone();
                 self.state = InputState::Navigation;
                 self.search_buffer.clear();
-                InputAction::ExecuteSearch { pattern, direction }
+
+                // Don't execute search with empty pattern
+                if pattern.trim().is_empty() {
+                    InputAction::CancelSearch
+                } else {
+                    InputAction::ExecuteSearch { pattern, direction }
+                }
             }
-            (InputState::SearchInput { direction: _ }, KeyCode::Esc) => {
+            (InputState::SearchInput { direction: _ }, KeyCode::Esc, _) => {
                 self.state = InputState::Navigation;
                 self.search_buffer.clear();
                 InputAction::CancelSearch
@@ -177,7 +257,7 @@ mod tests {
         let mut sm = InputStateMachine::new();
 
         // Helper to create key press events
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Test basic navigation
         assert_eq!(
@@ -213,7 +293,7 @@ mod tests {
     #[test]
     fn test_forward_search_flow() {
         let mut sm = InputStateMachine::new();
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Enter forward search mode
         assert_eq!(
@@ -248,7 +328,7 @@ mod tests {
     #[test]
     fn test_backward_search_flow() {
         let mut sm = InputStateMachine::new();
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Enter backward search mode
         assert_eq!(
@@ -278,7 +358,7 @@ mod tests {
     #[test]
     fn test_search_escape() {
         let mut sm = InputStateMachine::new();
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Enter search mode and type something
         sm.handle_key_event(key_press(KeyCode::Char('/')));
@@ -298,7 +378,7 @@ mod tests {
     #[test]
     fn test_search_backspace() {
         let mut sm = InputStateMachine::new();
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Enter search mode and type something
         sm.handle_key_event(key_press(KeyCode::Char('/')));
@@ -317,12 +397,30 @@ mod tests {
             }
         );
         assert_eq!(sm.get_search_buffer(), "tes");
+        assert_eq!(
+            sm.get_state(),
+            InputState::SearchInput {
+                direction: SearchDirection::Forward
+            }
+        );
+
+        // Continue backspacing until empty
+        sm.handle_key_event(key_press(KeyCode::Backspace)); // "te"
+        sm.handle_key_event(key_press(KeyCode::Backspace)); // "t"
+
+        // Last backspace should return to navigation mode
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Backspace)),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_search_buffer(), "");
+        assert_eq!(sm.get_state(), InputState::Navigation);
     }
 
     #[test]
     fn test_arrow_keys() {
         let mut sm = InputStateMachine::new();
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         assert_eq!(
             sm.handle_key_event(key_press(KeyCode::Up)),
@@ -345,7 +443,7 @@ mod tests {
     #[test]
     fn test_invalid_input() {
         let mut sm = InputStateMachine::new();
-        let key_press = |code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE);
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Invalid keys in navigation mode
         assert_eq!(
@@ -363,6 +461,188 @@ mod tests {
             sm.handle_key_event(key_press(KeyCode::Tab)),
             InputAction::InvalidInput
         );
+    }
+
+    #[test]
+    fn test_ctrl_c_behavior() {
+        let mut sm = InputStateMachine::new();
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl_key = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+
+        // Ctrl+C in navigation mode should quit
+        assert_eq!(
+            sm.handle_key_event(ctrl_key(KeyCode::Char('c'))),
+            InputAction::Quit
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+
+        // Enter search mode
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        assert_eq!(
+            sm.get_state(),
+            InputState::SearchInput {
+                direction: SearchDirection::Forward
+            }
+        );
+
+        // Type something in search buffer
+        sm.handle_key_event(key_press(KeyCode::Char('t')));
+        sm.handle_key_event(key_press(KeyCode::Char('e')));
+        assert_eq!(sm.get_search_buffer(), "te");
+
+        // Ctrl+C in search mode should cancel search and return to navigation
+        assert_eq!(
+            sm.handle_key_event(ctrl_key(KeyCode::Char('c'))),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+        assert_eq!(sm.get_search_buffer(), "");
+    }
+
+    #[test]
+    fn test_empty_search_pattern() {
+        let mut sm = InputStateMachine::new();
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // Enter forward search mode
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+
+        // Press enter without typing anything - should cancel search
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Enter)),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+
+        // Enter search mode again and type only spaces
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        sm.handle_key_event(key_press(KeyCode::Char(' ')));
+        sm.handle_key_event(key_press(KeyCode::Char(' ')));
+
+        // Press enter with only spaces - should also cancel search
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Enter)),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+    }
+
+    #[test]
+    fn test_search_exit_conditions() {
+        let mut sm = InputStateMachine::new();
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl_key = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+
+        // Test 1: Esc in empty search
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Esc)),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+        assert_eq!(sm.get_search_buffer(), "");
+
+        // Test 2: Ctrl+C in empty search
+        sm.handle_key_event(key_press(KeyCode::Char('?')));
+        assert_eq!(
+            sm.handle_key_event(ctrl_key(KeyCode::Char('c'))),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+        assert_eq!(sm.get_search_buffer(), "");
+
+        // Test 3: ':' in empty search (less command mode behavior)
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Char(':'))),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+        assert_eq!(sm.get_search_buffer(), "");
+
+        // Test 4: Enter in empty search
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Enter)),
+            InputAction::CancelSearch
+        );
+        assert_eq!(sm.get_state(), InputState::Navigation);
+        assert_eq!(sm.get_search_buffer(), "");
+
+        // Test 5: ':' should NOT cancel search when buffer is not empty
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        sm.handle_key_event(key_press(KeyCode::Char('t')));
+        sm.handle_key_event(key_press(KeyCode::Char('e')));
+        assert_eq!(sm.get_search_buffer(), "te");
+
+        // Now ':' should be treated as a normal character
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Char(':'))),
+            InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "te:".to_string(),
+            }
+        );
+        assert_eq!(
+            sm.get_state(),
+            InputState::SearchInput {
+                direction: SearchDirection::Forward
+            }
+        );
+        assert_eq!(sm.get_search_buffer(), "te:");
+    }
+
+    #[test]
+    fn test_caps_lock_and_shift_handling() {
+        let mut sm = InputStateMachine::new();
+        let key_press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let shift_key = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        let ctrl_key = |code| KeyEvent::new(code, KeyModifiers::CONTROL);
+
+        // Test navigation with shift (simulating caps lock or shift key)
+        assert_eq!(
+            sm.handle_key_event(shift_key(KeyCode::Char('j'))),
+            InputAction::ScrollDown(1)
+        );
+
+        assert_eq!(
+            sm.handle_key_event(shift_key(KeyCode::Char('k'))),
+            InputAction::ScrollUp(1)
+        );
+
+        // Test that Ctrl combinations still work
+        assert_eq!(
+            sm.handle_key_event(ctrl_key(KeyCode::Char('c'))),
+            InputAction::Quit
+        );
+
+        // Enter search mode and test shift characters
+        sm.handle_key_event(key_press(KeyCode::Char('/')));
+        assert_eq!(
+            sm.get_state(),
+            InputState::SearchInput {
+                direction: SearchDirection::Forward
+            }
+        );
+
+        // Type with shift should work
+        assert_eq!(
+            sm.handle_key_event(shift_key(KeyCode::Char('T'))),
+            InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "T".to_string(),
+            }
+        );
+
+        assert_eq!(
+            sm.handle_key_event(key_press(KeyCode::Char('e'))),
+            InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "Te".to_string(),
+            }
+        );
+
+        assert_eq!(sm.get_search_buffer(), "Te");
     }
 
     #[test]

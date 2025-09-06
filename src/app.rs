@@ -26,7 +26,6 @@ struct SearchState {
     pattern: String,
     direction: SearchDirection,
     options: SearchOptions,
-    last_found_line: Option<u64>,
 }
 
 impl Application {
@@ -189,12 +188,10 @@ impl Application {
                             pattern: pattern.clone(),
                             direction,
                             options,
-                            last_found_line: Some(line_number),
                         });
 
-                        // Center the match in viewport (less-like behavior)
-                        let page_size = view_state.viewport_info.lines_per_page();
-                        view_state.viewport_top = line_number.saturating_sub(page_size / 2);
+                        // Put the match at the top of viewport (less-like behavior)
+                        view_state.viewport_top = line_number;
 
                         // Clear search prompt and messages - search completed successfully
                         view_state.status_line.clear_search_prompt();
@@ -221,29 +218,34 @@ impl Application {
             }
             InputAction::NextMatch => {
                 if let Some(ref mut search) = self.search_state {
-                    let start_line = search
-                        .last_found_line
-                        .map_or(view_state.viewport_top, |line| line + 1);
-
+                    // NextMatch continues in the same direction as original search
                     let search_result = match search.direction {
                         SearchDirection::Forward => {
+                            // For forward search, start from viewport_top + 1
                             self.search_engine
-                                .search_from(&search.pattern, start_line, &search.options)
+                                .search_from(
+                                    &search.pattern,
+                                    view_state.viewport_top + 1,
+                                    &search.options,
+                                )
                                 .await
                         }
                         SearchDirection::Backward => {
+                            // For backward search, start from viewport_top - 1
                             self.search_engine
-                                .search_prev(&search.pattern, start_line, &search.options)
+                                .search_prev(
+                                    &search.pattern,
+                                    view_state.viewport_top.saturating_sub(1),
+                                    &search.options,
+                                )
                                 .await
                         }
                     };
 
                     match search_result {
                         Ok(Some(line_number)) => {
-                            search.last_found_line = Some(line_number);
-                            // Center match in viewport
-                            let page_size = view_state.viewport_info.lines_per_page();
-                            view_state.viewport_top = line_number.saturating_sub(page_size / 2);
+                            // Put the match at the top of viewport
+                            view_state.viewport_top = line_number;
                         }
                         Ok(None) => {
                             view_state.status_line.message = Some("Pattern not found".to_string());
@@ -261,28 +263,34 @@ impl Application {
             }
             InputAction::PreviousMatch => {
                 if let Some(ref mut search) = self.search_state {
-                    let start_line = search.last_found_line.unwrap_or(view_state.viewport_top);
-
-                    // Reverse the search direction for "previous"
+                    // PreviousMatch goes in opposite direction of original search
                     let search_result = match search.direction {
                         SearchDirection::Forward => {
+                            // For forward search, previous means go backward from viewport_top - 1
                             self.search_engine
-                                .search_prev(&search.pattern, start_line, &search.options)
+                                .search_prev(
+                                    &search.pattern,
+                                    view_state.viewport_top.saturating_sub(1),
+                                    &search.options,
+                                )
                                 .await
                         }
                         SearchDirection::Backward => {
+                            // For backward search, previous means go forward from viewport_top + 1
                             self.search_engine
-                                .search_from(&search.pattern, start_line, &search.options)
+                                .search_from(
+                                    &search.pattern,
+                                    view_state.viewport_top + 1,
+                                    &search.options,
+                                )
                                 .await
                         }
                     };
 
                     match search_result {
                         Ok(Some(line_number)) => {
-                            search.last_found_line = Some(line_number);
-                            // Center match in viewport
-                            let page_size = view_state.viewport_info.lines_per_page();
-                            view_state.viewport_top = line_number.saturating_sub(page_size / 2);
+                            // Put the match at the top of viewport
+                            view_state.viewport_top = line_number;
                         }
                         Ok(None) => {
                             view_state.status_line.message = Some("Pattern not found".to_string());
