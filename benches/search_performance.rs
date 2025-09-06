@@ -57,12 +57,12 @@ fn create_log_file_with_patterns(size_kb: usize, pattern_frequency: usize) -> Na
         } else if line_num % (pattern_frequency * 15) == 0 {
             // Add JSON-like structured logs every 1500 lines
             format!(
-                "[2024-09-02T10:{}:{:02}] {} {}: {{\"event\":\"user_action\",\"user_id\":\"{}\",\"action\":\"login\",\"timestamp\":{},\"metadata\":{{\"browser\":\"Chrome/118.0\",\"os\":\"Linux\"}}}}\n",
+                "[2024-09-02T10:{}:{:02}] {} {}: {{\"event\":\"user_action\",\"user_id\":\"usr_{:08x}\",\"action\":\"login\",\"timestamp\":{},\"metadata\":{{\"browser\":\"Chrome/118.0\",\"os\":\"Linux\"}}}}\n",
                 (line_num / 3600) % 24,
                 (line_num / 60) % 60,
                 log_level,
                 service,
-                format!("usr_{:08x}", line_num),
+                line_num,
                 1609459200 + line_num * 60
             )
         } else {

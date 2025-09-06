@@ -186,7 +186,7 @@ impl StatusLine {
             current_line,
             total_lines,
             percentage: match total_lines {
-                Some(total) if total > 0 => current_line as f32 / total as f32,
+                Some(total) if total > 0 => (current_line + 1) as f32 / total as f32,
                 _ => 0.0,
             },
             byte_offset,
@@ -499,6 +499,37 @@ mod tests {
             byte_offset: 2048,
         };
         assert_eq!(end_pos.format_position(), "END");
+    }
+
+    #[test]
+    fn test_percentage_calculation() {
+        let mut status_line = StatusLine::new();
+
+        // Test percentage calculation for different positions
+        // Line 1 of 10 should be 10%
+        status_line.update_position(0, Some(10), 0);
+        assert_eq!(status_line.position.percentage, 0.1);
+        assert_eq!(status_line.position.format_position(), "Line 1/10 (10%)");
+
+        // Line 5 of 10 should be 50%
+        status_line.update_position(4, Some(10), 0);
+        assert_eq!(status_line.position.percentage, 0.5);
+        assert_eq!(status_line.position.format_position(), "Line 5/10 (50%)");
+
+        // Line 10 of 10 should be 100%
+        status_line.update_position(9, Some(10), 0);
+        assert_eq!(status_line.position.percentage, 1.0);
+        assert_eq!(status_line.position.format_position(), "Line 10/10 (100%)");
+
+        // Edge case: single line file
+        status_line.update_position(0, Some(1), 0);
+        assert_eq!(status_line.position.percentage, 1.0);
+        assert_eq!(status_line.position.format_position(), "Line 1/1 (100%)");
+
+        // Edge case: zero lines (should not crash)
+        status_line.update_position(0, Some(0), 0);
+        assert_eq!(status_line.position.percentage, 0.0);
+        assert_eq!(status_line.position.format_position(), "Empty");
     }
 
     #[test]

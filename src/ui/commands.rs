@@ -47,7 +47,6 @@ pub enum DisplayCommand {
     ToggleLineNumbers, // -N flag equivalent
     ToggleWordWrap,    // -S flag equivalent
     SetTabWidth(u8),   // Tab width adjustment
-    Refresh,           // Ctrl-L
     ShowHelp,          // h
     ShowFileInfo,      // = (show file info)
 }
@@ -163,7 +162,6 @@ mod tests {
         assert!(DisplayCommand::ToggleWordWrap.affects_layout());
         assert!(DisplayCommand::SetTabWidth(4).affects_layout());
         assert!(!DisplayCommand::ShowHelp.affects_layout());
-        assert!(!DisplayCommand::Refresh.affects_layout());
     }
 
     #[test]
