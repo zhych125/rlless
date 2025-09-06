@@ -21,11 +21,11 @@
 //! - [`ui`] - Terminal user interface components
 //! - [`app`] - Application core and component coordination
 
-// Core modules - P0 Essential for MVP
+// Core modules
 pub mod error;
 pub mod file_handler;
 
-// Core components - Phase 2 implementation
+// Core components
 pub mod app;
 pub mod search;
 pub mod ui;
@@ -35,7 +35,7 @@ pub use error::{Result, RllessError};
 
 // Public API surface for external usage
 pub use app::Application;
-pub use file_handler::{CompressionType, FileAccessor, MatchInfo};
+pub use file_handler::{CompressionType, FileAccessor};
 pub use search::{RipgrepEngine, SearchEngine, SearchOptions, SearchStats};
 
 // Version information

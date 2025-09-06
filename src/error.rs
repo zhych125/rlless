@@ -55,7 +55,7 @@ pub enum RllessError {
     #[error("UI operation failed: {message}")]
     UIError { message: String },
 
-    /// Configuration related errors (for Phase 4)
+    /// Configuration related errors
     #[error("Configuration error: {message}")]
     ConfigError { message: String },
 

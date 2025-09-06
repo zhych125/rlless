@@ -5,7 +5,7 @@
 //! and provides efficient result caching.
 
 use crate::error::{Result, RllessError};
-use crate::file_handler::accessor::{FileAccessor, MatchInfo};
+use crate::file_handler::accessor::FileAccessor;
 use async_trait::async_trait;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -57,7 +57,7 @@ pub trait SearchEngine: Send + Sync {
     /// * `options` - Search configuration options
     ///
     /// # Returns
-    /// * Some(MatchInfo) if pattern found
+    /// * Some(line_number) if pattern found
     /// * None if pattern not found before EOF
     ///
     /// # Performance
@@ -69,7 +69,7 @@ pub trait SearchEngine: Send + Sync {
         pattern: &str,
         start_line: u64,
         options: &SearchOptions,
-    ) -> Result<Option<MatchInfo>>;
+    ) -> Result<Option<u64>>;
 
     /// Search for the previous occurrence of a pattern
     ///
@@ -79,34 +79,34 @@ pub trait SearchEngine: Send + Sync {
     /// * `options` - Search configuration options
     ///
     /// # Returns
-    /// * Some(MatchInfo) if pattern found
+    /// * Some(line_number) if pattern found
     /// * None if pattern not found before beginning of file
     async fn search_prev(
         &self,
         pattern: &str,
         start_line: u64,
         options: &SearchOptions,
-    ) -> Result<Option<MatchInfo>>;
+    ) -> Result<Option<u64>>;
 
-    /// Search for all occurrences of a pattern in the file
+    /// Get match ranges for a specific line
     ///
     /// # Arguments
     /// * `pattern` - Search pattern (string or regex depending on options)
+    /// * `line` - Line content to search
     /// * `options` - Search configuration options
-    /// * `max_results` - Maximum number of results to return (None for unlimited)
     ///
     /// # Returns
-    /// * Vector of all matches found
+    /// * Vector of (start, end) byte ranges where matches occur in the line
     ///
     /// # Performance
-    /// * Uses streaming search to avoid memory explosion
-    /// * Results are yielded as they're found
-    async fn search_all(
+    /// * Uses cached matcher for the pattern
+    /// * SIMD-optimized matching
+    fn get_line_matches(
         &self,
         pattern: &str,
+        line: &str,
         options: &SearchOptions,
-        max_results: Option<usize>,
-    ) -> Result<Vec<MatchInfo>>;
+    ) -> Result<Vec<(usize, usize)>>;
 
     /// Get search statistics and performance metrics
     fn get_stats(&self) -> SearchStats;
@@ -120,14 +120,14 @@ pub trait SearchEngine: Send + Sync {
 pub struct SearchStats {
     /// Total number of searches performed
     pub total_searches: u64,
-    /// Cache hit ratio (0.0 to 1.0)
+    /// Number of cache hits
+    pub cache_hits: u64,
+    /// Cache hit ratio (0.0 to 1.0) - computed on demand
     pub cache_hit_ratio: f64,
     /// Average search time in milliseconds
     pub avg_search_time_ms: f64,
     /// Number of patterns currently cached
     pub cached_patterns: usize,
-    /// Total bytes searched
-    pub total_bytes_searched: u64,
 }
 
 /// Cache key for storing compiled search patterns and results
@@ -166,13 +166,10 @@ pub struct RipgrepEngine {
     file_accessor: Arc<dyn FileAccessor>,
     /// LRU cache for compiled regex matchers
     matcher_cache: RwLock<LruCache<SearchCacheKey, Arc<RegexMatcher>>>,
-    /// LRU cache for recent search results
-    result_cache: RwLock<LruCache<(SearchCacheKey, u64), Option<MatchInfo>>>,
+    /// LRU cache for recent search results (line numbers)
+    result_cache: RwLock<LruCache<(SearchCacheKey, u64), Option<u64>>>,
     /// Performance statistics
     stats: RwLock<SearchStats>,
-    /// Search operation timeouts
-    #[allow(dead_code)] // Will be used for ReDoS protection
-    timeout_duration: Duration,
 }
 
 impl RipgrepEngine {
@@ -193,7 +190,6 @@ impl RipgrepEngine {
                 NonZeroUsize::new(1000).unwrap(), // Cache up to 1000 recent results
             )),
             stats: RwLock::new(SearchStats::default()),
-            timeout_duration: Duration::from_secs(10),
         }
     }
 
@@ -283,44 +279,6 @@ impl RipgrepEngine {
             RllessError::search_error(format!("Invalid regex pattern: {}", e), e.into())
         })
     }
-
-    /// Add context lines to a search match
-    async fn add_context(
-        &self,
-        mut search_match: MatchInfo,
-        options: &SearchOptions,
-    ) -> Result<MatchInfo> {
-        if options.context_lines == 0 {
-            return Ok(search_match);
-        }
-
-        let context_lines = options.context_lines as u64;
-
-        // Add context before
-        let context_start = search_match.line_number.saturating_sub(context_lines);
-        if context_start < search_match.line_number {
-            let before_lines = self
-                .file_accessor
-                .read_lines_range(context_start, search_match.line_number - context_start)
-                .await?;
-            search_match.context_before = before_lines
-                .into_iter()
-                .map(|cow| cow.into_owned())
-                .collect();
-        }
-
-        // Add context after
-        let after_lines = self
-            .file_accessor
-            .read_lines_range(search_match.line_number + 1, context_lines)
-            .await?;
-        search_match.context_after = after_lines
-            .into_iter()
-            .map(|cow| cow.into_owned())
-            .collect();
-
-        Ok(search_match)
-    }
 }
 
 /// Escape special regex characters in a literal string
@@ -348,7 +306,7 @@ impl SearchEngine for RipgrepEngine {
         pattern: &str,
         start_line: u64,
         options: &SearchOptions,
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         let start_time = Instant::now();
 
         // Update stats
@@ -366,14 +324,12 @@ impl SearchEngine for RipgrepEngine {
         {
             let mut cache = self.result_cache.write();
             if let Some(cached_result) = cache.get(&(cache_key.clone(), start_line)) {
-                // Update cache hit ratio
+                // Update cache hit count
                 {
                     let mut stats = self.stats.write();
-                    let total = stats.total_searches as f64;
-                    let hits = (stats.cache_hit_ratio * (total - 1.0)) + 1.0;
-                    stats.cache_hit_ratio = hits / total;
+                    stats.cache_hits += 1;
                 }
-                return Ok(cached_result.clone());
+                return Ok(*cached_result);
             }
         }
 
@@ -385,19 +341,9 @@ impl SearchEngine for RipgrepEngine {
 
         // Define the search operation
         let search_operation = async {
-            let result = self
-                .file_accessor
+            self.file_accessor
                 .find_next_match(start_line, &search_fn)
-                .await?;
-
-            // Add context to the match if found
-            match result {
-                Some(match_info) => {
-                    let with_context = self.add_context(match_info, options).await?;
-                    Result::<Option<MatchInfo>>::Ok(Some(with_context))
-                }
-                None => Result::<Option<MatchInfo>>::Ok(None),
-            }
+                .await
         };
 
         // Apply timeout if specified
@@ -417,7 +363,7 @@ impl SearchEngine for RipgrepEngine {
         // Cache the result
         {
             let mut cache = self.result_cache.write();
-            cache.put((cache_key, start_line), search_result.clone());
+            cache.put((cache_key, start_line), search_result);
         }
 
         // Update performance stats
@@ -437,13 +383,31 @@ impl SearchEngine for RipgrepEngine {
         pattern: &str,
         start_line: u64,
         options: &SearchOptions,
-    ) -> Result<Option<MatchInfo>> {
+    ) -> Result<Option<u64>> {
         let start_time = Instant::now();
 
         // Update stats
         {
             let mut stats = self.stats.write();
             stats.total_searches += 1;
+        }
+
+        // Check result cache first
+        let cache_key = SearchCacheKey {
+            pattern: pattern.to_string(),
+            options: options.into(),
+        };
+
+        {
+            let mut cache = self.result_cache.write();
+            if let Some(cached_result) = cache.get(&(cache_key.clone(), start_line)) {
+                // Update cache hit count
+                {
+                    let mut stats = self.stats.write();
+                    stats.cache_hits += 1;
+                }
+                return Ok(*cached_result);
+            }
         }
 
         // Get or create matcher
@@ -454,19 +418,9 @@ impl SearchEngine for RipgrepEngine {
 
         // Define the search operation
         let search_operation = async {
-            let result = self
-                .file_accessor
+            self.file_accessor
                 .find_prev_match(start_line, &search_fn)
-                .await?;
-
-            // Add context to the match if found
-            match result {
-                Some(match_info) => {
-                    let with_context = self.add_context(match_info, options).await?;
-                    Result::<Option<MatchInfo>>::Ok(Some(with_context))
-                }
-                None => Result::<Option<MatchInfo>>::Ok(None),
-            }
+                .await
         };
 
         // Apply timeout if specified
@@ -483,6 +437,12 @@ impl SearchEngine for RipgrepEngine {
             search_operation.await
         }?;
 
+        // Cache the result
+        {
+            let mut cache = self.result_cache.write();
+            cache.put((cache_key, start_line), search_result);
+        }
+
         // Update performance stats
         {
             let mut stats = self.stats.write();
@@ -495,28 +455,6 @@ impl SearchEngine for RipgrepEngine {
         Ok(search_result)
     }
 
-    async fn search_all(
-        &self,
-        pattern: &str,
-        options: &SearchOptions,
-        max_results: Option<usize>,
-    ) -> Result<Vec<MatchInfo>> {
-        let mut results = Vec::new();
-        let mut current_line = 0;
-        let max = max_results.unwrap_or(usize::MAX);
-
-        while results.len() < max {
-            if let Some(search_match) = self.search_from(pattern, current_line, options).await? {
-                current_line = search_match.line_number + 1;
-                results.push(search_match);
-            } else {
-                break; // No more matches
-            }
-        }
-
-        Ok(results)
-    }
-
     fn get_stats(&self) -> SearchStats {
         let stats = self.stats.read();
         let mut result = stats.clone();
@@ -524,16 +462,39 @@ impl SearchEngine for RipgrepEngine {
         // Add current cache sizes
         result.cached_patterns = self.matcher_cache.read().len();
 
+        // Compute cache hit ratio on demand
+        result.cache_hit_ratio = if result.total_searches > 0 {
+            result.cache_hits as f64 / result.total_searches as f64
+        } else {
+            0.0
+        };
+
         result
+    }
+
+    fn get_line_matches(
+        &self,
+        pattern: &str,
+        line: &str,
+        options: &SearchOptions,
+    ) -> Result<Vec<(usize, usize)>> {
+        // Get or create matcher for the pattern
+        let matcher = self.get_or_create_matcher(pattern, options)?;
+
+        // Use the same search function logic as FileAccessor integration
+        let search_fn = self.create_search_function(matcher);
+
+        // Apply the search function to the line
+        Ok(search_fn(line))
     }
 
     fn clear_cache(&self) {
         self.matcher_cache.write().clear();
         self.result_cache.write().clear();
 
-        // Reset cache hit ratio but keep other stats
+        // Reset cache hits but keep other stats
         let mut stats = self.stats.write();
-        stats.cache_hit_ratio = 0.0;
+        stats.cache_hits = 0;
     }
 }
 
@@ -561,10 +522,14 @@ mod tests {
         let result = engine.search_from("fox", 0, &options).await.unwrap();
         assert!(result.is_some());
 
-        let search_match = result.unwrap();
-        assert_eq!(search_match.line_number, 0);
-        assert_eq!(search_match.line_content, "The quick brown fox");
-        assert_eq!(search_match.match_ranges, vec![(16, 19)]);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 0);
+
+        // Test get_line_matches for highlight computation
+        let match_ranges = engine
+            .get_line_matches("fox", "The quick brown fox", &options)
+            .unwrap();
+        assert_eq!(match_ranges, vec![(16, 19)]);
     }
 
     #[tokio::test]
@@ -578,9 +543,14 @@ mod tests {
         let result = engine.search_from("FOX", 0, &options).await.unwrap();
         assert!(result.is_some());
 
-        let search_match = result.unwrap();
-        assert_eq!(search_match.line_number, 0);
-        assert_eq!(search_match.match_ranges, vec![(16, 19)]);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 0);
+
+        // Test case insensitive matching
+        let match_ranges = engine
+            .get_line_matches("FOX", "The quick brown fox", &options)
+            .unwrap();
+        assert_eq!(match_ranges, vec![(16, 19)]);
     }
 
     #[tokio::test]
@@ -594,9 +564,14 @@ mod tests {
         let result = engine.search_from(r"qu\w+k", 0, &options).await.unwrap();
         assert!(result.is_some());
 
-        let search_match = result.unwrap();
-        assert_eq!(search_match.line_number, 0);
-        assert_eq!(search_match.match_ranges, vec![(4, 9)]); // "quick"
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 0);
+
+        // Test regex matching
+        let match_ranges = engine
+            .get_line_matches(r"qu\w+k", "The quick brown fox", &options)
+            .unwrap();
+        assert_eq!(match_ranges, vec![(4, 9)]); // "quick"
     }
 
     #[tokio::test]
@@ -610,7 +585,7 @@ mod tests {
         // Should find "box" as a whole word
         let result = engine.search_from("box", 0, &options).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().line_number, 2);
+        assert_eq!(result.unwrap(), 2);
 
         // Should NOT find "ox" as it's part of "fox"
         let result = engine.search_from("ox", 0, &options).await.unwrap();
@@ -625,21 +600,8 @@ mod tests {
         let result = engine.search_prev("jump", 4, &options).await.unwrap();
         assert!(result.is_some());
 
-        let search_match = result.unwrap();
-        assert_eq!(search_match.line_number, 3); // "How vexingly quick daft zebras jump!"
-    }
-
-    #[tokio::test]
-    async fn test_search_all() {
-        let engine = create_test_engine();
-        let options = SearchOptions::default();
-
-        let results = engine.search_all("qu", &options, None).await.unwrap();
-        assert_eq!(results.len(), 3); // "qu" appears in lines 0, 2, and 3
-
-        assert_eq!(results[0].line_number, 0);
-        assert_eq!(results[1].line_number, 2);
-        assert_eq!(results[2].line_number, 3);
+        let line_number = result.unwrap();
+        assert_eq!(line_number, 3); // "How vexingly quick daft zebras jump!"
     }
 
     #[tokio::test]
@@ -685,5 +647,42 @@ mod tests {
         let result = engine.search_from("fox", 0, &options).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_get_line_matches() {
+        let engine = create_test_engine();
+        let options = SearchOptions::default();
+
+        // Test single match
+        let matches = engine
+            .get_line_matches("fox", "The quick brown fox", &options)
+            .unwrap();
+        assert_eq!(matches, vec![(16, 19)]);
+
+        // Test multiple matches
+        let test_line = "The quick brown fox jumps over the quiet dog";
+        let matches = engine.get_line_matches("qu", test_line, &options).unwrap();
+        // Let's find where "qu" actually appears:
+        // "The quick brown fox jumps over the quiet dog"
+        //      ^^                              ^^
+        //      4-6                             35-37
+        assert_eq!(matches, vec![(4, 6), (35, 37)]); // "qu" in "quick" and "quiet"
+
+        // Test no matches
+        let matches = engine
+            .get_line_matches("xyz", "The quick brown fox", &options)
+            .unwrap();
+        assert!(matches.is_empty());
+
+        // Test regex mode
+        let regex_options = SearchOptions {
+            regex_mode: true,
+            ..Default::default()
+        };
+        let matches = engine
+            .get_line_matches(r"\b\w{5}\b", "The quick brown fox jumps", &regex_options)
+            .unwrap();
+        assert_eq!(matches, vec![(4, 9), (10, 15), (20, 25)]); // "quick", "brown", "jumps"
     }
 }

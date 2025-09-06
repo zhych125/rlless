@@ -50,22 +50,14 @@ async fn main() -> Result<()> {
         anyhow::bail!("Path is not a regular file: {}", file_path.display());
     }
 
-    // For now, just print basic file information (MVP foundation)
-    println!(
-        "rlless {} - Processing file: {}",
-        rlless::VERSION,
-        file_path.display()
-    );
+    // Initialize the Application and start the interactive event loop
+    use rlless::ui::TerminalUI;
+    use rlless::Application;
 
-    // Basic file info
-    let metadata = file_path.metadata()?;
-    let size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-    println!("File size: {:.2} MB", size_mb);
+    let ui_renderer = Box::new(TerminalUI::new()?);
+    let mut app = Application::new(&file_path, ui_renderer).await?;
 
-    // TODO: In Phase 2, this will initialize the Application and start the main event loop
-    println!(
-        "Foundation established. Core functionality will be implemented in subsequent phases."
-    );
+    app.run().await?;
 
     Ok(())
 }

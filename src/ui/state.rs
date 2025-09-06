@@ -5,7 +5,8 @@
 
 use crate::ui::{ColorTheme, SearchDirection};
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Viewport state for rendering - focused only on what's currently visible
@@ -32,11 +33,15 @@ pub struct ViewState<'a> {
 
     /// Viewport dimensions
     pub viewport_info: ViewportInfo,
+
+    /// Search highlights mapped by absolute line number to match ranges
+    /// Uses absolute line numbers (not viewport-relative positions)
+    pub search_highlights: std::collections::HashMap<u64, Vec<(usize, usize)>>,
 }
 
 impl<'a> ViewState<'a> {
     /// Create a new viewport state
-    pub fn new(file_path: PathBuf, viewport_width: u16, viewport_height: u16) -> Self {
+    pub fn new(file_path: impl AsRef<Path>, viewport_width: u16, viewport_height: u16) -> Self {
         Self {
             viewport_top: 0,
             cursor_line: 0,
@@ -45,6 +50,7 @@ impl<'a> ViewState<'a> {
             file_info: FileDisplayInfo::new(file_path),
             display_config: DisplayConfig::default(),
             viewport_info: ViewportInfo::new(viewport_width, viewport_height),
+            search_highlights: HashMap::new(),
         }
     }
 
@@ -78,6 +84,19 @@ impl<'a> ViewState<'a> {
         } else {
             self.viewport_top = self.viewport_top.saturating_sub((-lines) as u64);
         }
+    }
+
+    /// Set search highlights from a list of (line_number, match_ranges) pairs
+    pub fn set_search_highlights(&mut self, highlights: Vec<(u64, Vec<(usize, usize)>)>) {
+        self.search_highlights.clear();
+        for (line_num, ranges) in highlights {
+            self.search_highlights.insert(line_num, ranges);
+        }
+    }
+
+    /// Clear all search highlights
+    pub fn clear_search_highlights(&mut self) {
+        self.search_highlights.clear();
     }
 }
 
@@ -157,14 +176,18 @@ impl StatusLine {
     }
 
     /// Update position information
-    pub fn update_position(&mut self, current_line: u64, total_lines: u64, byte_offset: u64) {
+    pub fn update_position(
+        &mut self,
+        current_line: u64,
+        total_lines: Option<u64>,
+        byte_offset: u64,
+    ) {
         self.position = PositionInfo {
             current_line,
             total_lines,
-            percentage: if total_lines > 0 {
-                current_line as f32 / total_lines as f32
-            } else {
-                0.0
+            percentage: match total_lines {
+                Some(total) if total > 0 => current_line as f32 / total as f32,
+                _ => 0.0,
             },
             byte_offset,
         };
@@ -202,7 +225,7 @@ impl DisplayMode {
 #[derive(Debug, Clone)]
 pub struct PositionInfo {
     pub current_line: u64,
-    pub total_lines: u64,
+    pub total_lines: Option<u64>,
     pub percentage: f32,
     pub byte_offset: u64,
 }
@@ -211,7 +234,7 @@ impl Default for PositionInfo {
     fn default() -> Self {
         Self {
             current_line: 0,
-            total_lines: 0,
+            total_lines: None,
             percentage: 0.0,
             byte_offset: 0,
         }
@@ -221,17 +244,24 @@ impl Default for PositionInfo {
 impl PositionInfo {
     /// Format position as a display string
     pub fn format_position(&self) -> String {
-        if self.total_lines == 0 {
-            "Empty".to_string()
-        } else if self.current_line >= self.total_lines {
-            "END".to_string()
-        } else {
-            format!(
-                "Line {}/{} ({:.0}%)",
-                self.current_line + 1, // Display as 1-based
-                self.total_lines,
-                self.percentage * 100.0
-            )
+        match self.total_lines {
+            Some(0) => "Empty".to_string(),
+            Some(total) => {
+                if self.current_line >= total {
+                    "END".to_string()
+                } else {
+                    format!(
+                        "Line {}/{} ({:.0}%)",
+                        self.current_line + 1, // Display as 1-based
+                        total,
+                        self.percentage * 100.0
+                    )
+                }
+            }
+            None => {
+                // Total lines not known yet (large file with lazy indexing)
+                format!("Line {} (?)", self.current_line + 1)
+            }
         }
     }
 }
@@ -248,9 +278,9 @@ pub struct FileDisplayInfo {
 
 impl FileDisplayInfo {
     /// Create new file display info
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
-            path,
+            path: path.as_ref().to_path_buf(),
             size: 0,
             line_count: 0,
             modified: None,
@@ -439,21 +469,42 @@ mod tests {
     fn test_position_info() {
         let pos = PositionInfo {
             current_line: 49,
-            total_lines: 100,
+            total_lines: Some(100),
             percentage: 0.5,
             byte_offset: 1024,
         };
 
         assert_eq!(pos.format_position(), "Line 50/100 (50%)");
 
-        let empty_pos = PositionInfo::default();
+        let empty_pos = PositionInfo {
+            current_line: 0,
+            total_lines: Some(0),
+            percentage: 0.0,
+            byte_offset: 0,
+        };
         assert_eq!(empty_pos.format_position(), "Empty");
+
+        let unknown_total_pos = PositionInfo {
+            current_line: 49,
+            total_lines: None,
+            percentage: 0.0,
+            byte_offset: 1024,
+        };
+        assert_eq!(unknown_total_pos.format_position(), "Line 50 (?)");
+
+        let end_pos = PositionInfo {
+            current_line: 100,
+            total_lines: Some(100),
+            percentage: 1.0,
+            byte_offset: 2048,
+        };
+        assert_eq!(end_pos.format_position(), "END");
     }
 
     #[test]
     fn test_file_display_info() {
         let path = PathBuf::from("/path/to/test.log");
-        let mut info = FileDisplayInfo::new(path);
+        let mut info = FileDisplayInfo::new(&path);
         info.size = 1536; // 1.5 KB
 
         assert_eq!(info.filename(), "test.log");
