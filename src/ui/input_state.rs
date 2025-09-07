@@ -175,15 +175,6 @@ impl InputStateMachine {
                 self.search_buffer.clear();
                 InputAction::CancelSearch
             }
-            // Handle ':' in empty search - return to navigation (less command mode behavior)
-            (InputState::SearchInput { direction: _ }, KeyCode::Char(':'), modifiers)
-                if self.search_buffer.is_empty()
-                    && !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.state = InputState::Navigation;
-                self.search_buffer.clear();
-                InputAction::CancelSearch
-            }
             (InputState::SearchInput { direction }, KeyCode::Char(ch), modifiers)
                 if (ch.is_ascii_graphic() || ch == ' ')
                     && !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -551,12 +542,25 @@ mod tests {
         assert_eq!(sm.get_state(), InputState::Navigation);
         assert_eq!(sm.get_search_buffer(), "");
 
-        // Test 3: ':' in empty search (less command mode behavior)
+        // Test 3: ':' in empty search should be treated as regular character
         sm.handle_key_event(key_press(KeyCode::Char('/')));
         assert_eq!(
             sm.handle_key_event(key_press(KeyCode::Char(':'))),
-            InputAction::CancelSearch
+            InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: ":".to_string(),
+            }
         );
+        assert_eq!(
+            sm.get_state(),
+            InputState::SearchInput {
+                direction: SearchDirection::Forward
+            }
+        );
+        assert_eq!(sm.get_search_buffer(), ":");
+
+        // Clear search state before next test - press Enter to execute search with ":"
+        sm.handle_key_event(key_press(KeyCode::Enter));
         assert_eq!(sm.get_state(), InputState::Navigation);
         assert_eq!(sm.get_search_buffer(), "");
 
