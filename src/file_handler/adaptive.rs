@@ -251,11 +251,11 @@ impl FileAccessor for AdaptiveFileAccessor {
             }
         }
 
-        // If we couldn't skip any lines, stay at current position
-        if lines_skipped == 0 {
-            Ok(current_byte)
+        // If we couldn't complete the full skip due to EOF, return file_size
+        if lines_skipped < lines_to_skip {
+            Ok(self.file_size) // Return EOF indicator
         } else {
-            Ok(pos as u64)
+            Ok(pos as u64) // Return new position
         }
     }
 
@@ -418,9 +418,9 @@ mod tests {
         let next_pos = accessor.next_page_start(0, 2).await.unwrap();
         assert_eq!(next_pos, 12); // Should be at start of "line3"
 
-        // Test next page start - at end of file (should return file size)
-        let end_pos = accessor.next_page_start(24, 2).await.unwrap(); // Start of "line5"
-        assert_eq!(end_pos, 30); // Should move to end of file
+        // Test next page start - at end of file (should return file_size when can't complete skip)
+        let end_pos = accessor.next_page_start(24, 2).await.unwrap(); // Start of "line5", try to skip 2 lines
+        assert_eq!(end_pos, 30); // Should return file_size (30) since we can only skip 1 line, not 2
 
         // Test prev page start
         let prev_pos = accessor.prev_page_start(next_pos, 2).await.unwrap();
@@ -472,9 +472,9 @@ mod tests {
         let pos = accessor.next_page_start(2, 1).await.unwrap();
         assert_eq!(pos, 4); // Start of "C"
 
-        // At last line - should move to end of file
+        // At last line - should return file_size since we can't skip a full line
         let pos = accessor.next_page_start(4, 1).await.unwrap();
-        assert_eq!(pos, 6); // Move to end of file
+        assert_eq!(pos, 6); // Returns file_size (6) indicating EOF
     }
 
     #[tokio::test]

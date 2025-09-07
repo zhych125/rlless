@@ -118,7 +118,7 @@ pub trait FileAccessor: Send + Sync {
     ///
     /// # Returns
     /// * Byte position where next page should start
-    /// * May return same position if at EOF
+    /// * Returns file_size if at EOF (couldn't complete full navigation)
     ///
     /// # Usage
     /// Used for PageDown navigation

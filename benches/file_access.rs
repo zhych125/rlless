@@ -1,7 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use flate2::{write::GzEncoder, Compression};
-use rlless::file_handler::FileAccessorFactory;
+use rlless::file_handler::{FileAccessor, FileAccessorFactory};
 use std::io::Write;
+use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
 
@@ -121,13 +122,14 @@ fn bench_line_access(c: &mut Criterion) {
             format!("{}MB", size_kb / 1024)
         };
 
+        let arc_accessor = Arc::new(accessor) as Arc<dyn FileAccessor>;
         group.bench_with_input(
             BenchmarkId::new("uncompressed", &size_label),
-            &accessor,
+            &arc_accessor,
             |b, acc| {
                 b.iter(|| {
-                    let line = rt.block_on(async { acc.read_line(0).await.unwrap() });
-                    black_box(line);
+                    let lines = rt.block_on(async { acc.read_from_byte(0, 1).await.unwrap() });
+                    black_box(lines);
                 });
             },
         );
@@ -145,13 +147,14 @@ fn bench_line_access(c: &mut Criterion) {
             format!("{}MB", size_kb / 1024)
         };
 
+        let compressed_arc_accessor = Arc::new(compressed_accessor) as Arc<dyn FileAccessor>;
         group.bench_with_input(
             BenchmarkId::new("compressed", &compressed_size_label),
-            &compressed_accessor,
+            &compressed_arc_accessor,
             |b, acc| {
                 b.iter(|| {
-                    let line = rt.block_on(async { acc.read_line(0).await.unwrap() });
-                    black_box(line);
+                    let lines = rt.block_on(async { acc.read_from_byte(0, 1).await.unwrap() });
+                    black_box(lines);
                 });
             },
         );

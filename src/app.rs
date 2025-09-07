@@ -105,6 +105,7 @@ impl Application {
                     .file_accessor
                     .prev_page_start(view_state.viewport_top_byte, n as usize)
                     .await?;
+                view_state.at_eof = false; // Clear EOF flag (moving backward)
                 view_state.navigate_to_byte(new_byte);
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
@@ -115,7 +116,15 @@ impl Application {
                     .file_accessor
                     .next_page_start(view_state.viewport_top_byte, n as usize)
                     .await?;
-                view_state.navigate_to_byte(new_byte);
+
+                // Check if we hit EOF
+                if new_byte == self.file_accessor.file_size() {
+                    view_state.at_eof = true; // Set EOF flag for status display
+                } else {
+                    view_state.at_eof = false; // Clear EOF flag
+                    view_state.navigate_to_byte(new_byte);
+                }
+                // Always refresh content to show current state
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
                 Ok(true)
@@ -126,6 +135,7 @@ impl Application {
                     .file_accessor
                     .prev_page_start(view_state.viewport_top_byte, page_size)
                     .await?;
+                view_state.at_eof = false; // Clear EOF flag (moving backward)
                 view_state.navigate_to_byte(new_byte);
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
@@ -137,12 +147,21 @@ impl Application {
                     .file_accessor
                     .next_page_start(view_state.viewport_top_byte, page_size)
                     .await?;
-                view_state.navigate_to_byte(new_byte);
+
+                // Check if we hit EOF
+                if new_byte == self.file_accessor.file_size() {
+                    view_state.at_eof = true; // Set EOF flag for status display
+                } else {
+                    view_state.at_eof = false; // Clear EOF flag
+                    view_state.navigate_to_byte(new_byte);
+                }
+                // Always refresh content to show current state
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
                 Ok(true)
             }
             InputAction::GoToStart => {
+                view_state.at_eof = false; // Clear EOF flag
                 view_state.navigate_to_byte(0);
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
@@ -151,6 +170,7 @@ impl Application {
             InputAction::GoToEnd => {
                 let page_size = view_state.lines_per_page() as usize;
                 let end_byte = self.file_accessor.last_page_start(page_size).await?;
+                view_state.at_eof = false; // Clear EOF flag (GoToEnd navigates to a valid position)
                 view_state.navigate_to_byte(end_byte);
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
@@ -265,6 +285,7 @@ impl Application {
                     match search_result {
                         Ok(Some(match_byte)) => {
                             // Put the match at the top of viewport
+                            view_state.at_eof = false; // Clear EOF flag when search succeeds
                             view_state.navigate_to_byte(match_byte);
                         }
                         Ok(None) => {
@@ -321,6 +342,7 @@ impl Application {
                     match search_result {
                         Ok(Some(match_byte)) => {
                             // Put the match at the top of viewport
+                            view_state.at_eof = false; // Clear EOF flag when search succeeds
                             view_state.navigate_to_byte(match_byte);
                         }
                         Ok(None) => {
@@ -356,7 +378,14 @@ impl Application {
     /// Find the byte position of the start of the next line after given byte position
     async fn find_next_line_start(&self, current_byte: u64) -> Result<u64> {
         // Use FileAccessor's next_page_start with 1 line to find next line
-        self.file_accessor.next_page_start(current_byte, 1).await
+        let new_byte = self.file_accessor.next_page_start(current_byte, 1).await?;
+
+        // If at EOF (returned file_size), return current position to indicate no advancement
+        if new_byte == self.file_accessor.file_size() {
+            Ok(current_byte)
+        } else {
+            Ok(new_byte)
+        }
     }
 
     /// Find the byte position of the start of the previous line before given byte position

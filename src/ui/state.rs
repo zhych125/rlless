@@ -33,6 +33,9 @@ pub struct ViewState {
     /// Search highlights by viewport-relative line number (Vec index = viewport line)
     /// Empty Vec at index means no highlights for that line
     pub search_highlights: Vec<Vec<(usize, usize)>>,
+
+    /// Track if user has hit EOF during navigation (for EOD status display)
+    pub at_eof: bool,
 }
 
 impl ViewState {
@@ -47,6 +50,7 @@ impl ViewState {
             viewport_width,
             viewport_height,
             search_highlights: Vec::new(),
+            at_eof: false, // Start not at EOF
         }
     }
 
@@ -82,6 +86,16 @@ impl ViewState {
     ) {
         self.visible_lines = lines;
         self.search_highlights = highlights;
+    }
+
+    /// Format the complete status line for this view state
+    pub fn format_status_line(&self) -> String {
+        self.status_line.format_status_line(
+            &self.filename(),
+            self.viewport_top_byte,
+            self.file_size.unwrap_or(0),
+            self.at_eof,
+        )
     }
 }
 
@@ -129,6 +143,7 @@ impl StatusLine {
         filename: &str,
         current_byte: u64,
         total_bytes: u64,
+        at_eof: bool,
     ) -> String {
         if let Some((direction, buffer)) = &self.search_prompt {
             // Show search prompt: "/search_term"
@@ -137,8 +152,10 @@ impl StatusLine {
             // Calculate position on-the-fly
             let position = if total_bytes == 0 {
                 "Empty".to_string()
+            } else if at_eof {
+                "EOD".to_string() // End of Data - user hit EOF during navigation
             } else if current_byte >= total_bytes {
-                "END".to_string()
+                "END".to_string() // At end of file (for other cases)
             } else {
                 let percentage = (current_byte as f32 / total_bytes as f32) * 100.0;
                 format!("{:.0}%", percentage)
@@ -236,30 +253,35 @@ mod tests {
         let mut status = StatusLine::new();
 
         // Test normal status line with position
-        let formatted = status.format_status_line("test.log", 512, 1024);
+        let formatted = status.format_status_line("test.log", 512, 1024, false);
         assert_eq!(formatted, "test.log | 50%");
 
         // Test with message
         status.set_message("Pattern not found".to_string());
-        let formatted = status.format_status_line("test.log", 512, 1024);
+        let formatted = status.format_status_line("test.log", 512, 1024, false);
         assert_eq!(formatted, "test.log | 50% | Pattern not found");
 
         // Test empty file
-        let formatted = status.format_status_line("empty.log", 0, 0);
+        let formatted = status.format_status_line("empty.log", 0, 0, false);
         assert_eq!(formatted, "empty.log | Empty | Pattern not found");
 
         // Test at end
         status.clear_message();
-        let formatted = status.format_status_line("test.log", 1024, 1024);
+        let formatted = status.format_status_line("test.log", 1024, 1024, false);
         assert_eq!(formatted, "test.log | END");
 
         // Test search prompt
         status.set_search_prompt(SearchDirection::Forward);
-        let formatted = status.format_status_line("test.log", 512, 1024);
+        let formatted = status.format_status_line("test.log", 512, 1024, false);
         assert_eq!(formatted, "/");
 
         status.update_search_prompt(SearchDirection::Forward, "search term".to_string());
-        let formatted = status.format_status_line("test.log", 512, 1024);
+        let formatted = status.format_status_line("test.log", 512, 1024, false);
         assert_eq!(formatted, "/search term");
+
+        // Test EOD (End of Data) display when at_eof is true
+        status.clear_search_prompt();
+        let formatted = status.format_status_line("test.log", 512, 1024, true);
+        assert_eq!(formatted, "test.log | EOD");
     }
 }

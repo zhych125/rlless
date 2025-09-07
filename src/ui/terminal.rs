@@ -126,11 +126,7 @@ impl TerminalUI {
         view_state: &ViewState,
         theme: &ColorTheme,
     ) {
-        let status_text = view_state.status_line.format_status_line(
-            &view_state.filename(),
-            view_state.viewport_top_byte,
-            view_state.file_size.unwrap_or(0),
-        );
+        let status_text = view_state.format_status_line();
 
         // Use theme colors for status line directly
         let status_style = Style::default().bg(theme.status_bg).fg(theme.status_fg);
