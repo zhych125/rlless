@@ -112,19 +112,36 @@ impl Application {
                 Ok(true)
             }
             InputAction::ScrollDown(n) => {
+                // User is trying to scroll - check if last line of file is already visible
+                let file_size = self.file_accessor.file_size();
+
+                if !view_state.visible_lines.is_empty() {
+                    // Calculate byte position after our current viewport (end of what we can see)
+                    let end_of_viewport = self
+                        .file_accessor
+                        .next_page_start(
+                            view_state.viewport_top_byte,
+                            view_state.visible_lines.len(),
+                        )
+                        .await?;
+
+                    // If current viewport already shows the end of file, show EOD and stop scrolling
+                    if end_of_viewport >= file_size {
+                        view_state.at_eof = true;
+                        return Ok(true);
+                    }
+                }
+
+                // Normal scroll - try to advance
                 let new_byte = self
                     .file_accessor
                     .next_page_start(view_state.viewport_top_byte, n as usize)
                     .await?;
 
-                // Check if we hit EOF
-                if new_byte == self.file_accessor.file_size() {
-                    view_state.at_eof = true; // Set EOF flag for status display
-                } else {
-                    view_state.at_eof = false; // Clear EOF flag
-                    view_state.navigate_to_byte(new_byte);
-                }
-                // Always refresh content to show current state
+                // Move viewport and clear EOF flag for normal scrolling
+                view_state.at_eof = false;
+                view_state.navigate_to_byte(new_byte);
+
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
                 Ok(true)
@@ -148,14 +165,15 @@ impl Application {
                     .next_page_start(view_state.viewport_top_byte, page_size)
                     .await?;
 
-                // Check if we hit EOF
-                if new_byte == self.file_accessor.file_size() {
-                    view_state.at_eof = true; // Set EOF flag for status display
+                // Check if we hit EOF (next_page_start returns file_size when can't advance)
+                let file_size = self.file_accessor.file_size();
+                if new_byte == file_size {
+                    view_state.at_eof = true;
                 } else {
-                    view_state.at_eof = false; // Clear EOF flag
+                    view_state.at_eof = false;
                     view_state.navigate_to_byte(new_byte);
                 }
-                // Always refresh content to show current state
+
                 self.update_view_content(view_state, self.search_state.is_some())
                     .await?;
                 Ok(true)
