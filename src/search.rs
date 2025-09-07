@@ -25,8 +25,6 @@ pub struct SearchOptions {
     pub whole_word: bool,
     /// Treat pattern as regex (true) or literal string (false)
     pub regex_mode: bool,
-    /// Number of context lines to include in results
-    pub context_lines: u32,
     /// Maximum time to spend on a single search operation (ReDoS protection)
     pub timeout: Option<Duration>,
 }
@@ -34,10 +32,9 @@ pub struct SearchOptions {
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
-            case_sensitive: false,
-            whole_word: false,
-            regex_mode: false,
-            context_lines: 0,
+            case_sensitive: false,                  // less is case-insensitive by default
+            whole_word: false,                      // less doesn't use whole word matching
+            regex_mode: false,                      // less uses literal string matching by default
             timeout: Some(Duration::from_secs(10)), // 10 second default timeout
         }
     }
@@ -125,7 +122,6 @@ struct SearchOptionsKey {
     case_sensitive: bool,
     whole_word: bool,
     regex_mode: bool,
-    context_lines: u32,
 }
 
 impl From<&SearchOptions> for SearchOptionsKey {
@@ -134,7 +130,6 @@ impl From<&SearchOptions> for SearchOptionsKey {
             case_sensitive: options.case_sensitive,
             whole_word: options.whole_word,
             regex_mode: options.regex_mode,
-            context_lines: options.context_lines,
         }
     }
 }

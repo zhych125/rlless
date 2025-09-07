@@ -216,7 +216,6 @@ fn bench_search_navigation(c: &mut Criterion) {
     // Test search with context (like grep -C)
     group.bench_function("search_with_context", |b| {
         let options = SearchOptions {
-            context_lines: 3,
             ..Default::default()
         };
         b.iter(|| {
@@ -516,7 +515,6 @@ fn bench_random_start_positions(c: &mut Criterion) {
             &engine,
             |b, eng| {
                 let options = SearchOptions {
-                    context_lines: 2,
                     ..Default::default()
                 };
                 let mut rng = ChaCha8Rng::seed_from_u64(46); // Different seed

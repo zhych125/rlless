@@ -215,11 +215,8 @@ impl Application {
                 Ok(true)
             }
             InputAction::ExecuteSearch { pattern, direction } => {
-                // Less-like search: enable regex mode (default has regex_mode: false)
-                let options = SearchOptions {
-                    regex_mode: true, // Less treats patterns as basic regex
-                    ..Default::default()
-                };
+                // Less-like search: use literal string matching by default (like real less)
+                let options = SearchOptions::default();
                 let current_byte = view_state.viewport_top_byte;
 
                 // Search from current viewport position (less-like behavior)
