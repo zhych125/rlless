@@ -1,30 +1,27 @@
-//! Factory for creating appropriate FileAccessor based on file characteristics.
+//! Factory for creating FileAccessor instances.
 //!
-//! This module provides the FileAccessorFactory which automatically selects the most
-//! appropriate FileAccessor implementation based on file size, compression, and platform
-//! characteristics. It integrates validation and compression detection to ensure robust
-//! file handling.
+//! This module provides the FileAccessorFactory which creates AdaptiveFileAccessor instances
+//! that automatically handle file size, compression detection, and platform optimization.
 
 use crate::error::{Result, RllessError};
-use crate::file_handler::accessor::FileAccessor;
-use crate::file_handler::compression::{
-    detect_compression, CompressedFileAccessor, CompressionType,
-};
-use crate::file_handler::in_memory::InMemoryFileAccessor;
-use crate::file_handler::mmap::MmapFileAccessor;
+use crate::file_handler::adaptive::{AdaptiveFileAccessor, ByteSource};
+use crate::file_handler::compression::{decompress_file, detect_compression, DecompressionResult};
 use crate::file_handler::validation::validate_file_path;
+use memmap2::Mmap;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
-/// Factory for creating appropriate FileAccessor based on file characteristics
+/// Factory for creating AdaptiveFileAccessor instances
 ///
-/// This factory automatically selects between InMemoryFileAccessor and MmapFileAccessor
-/// based on file size and platform characteristics. It performs comprehensive validation
-/// and compression detection to ensure optimal performance and reliability.
+/// This factory automatically selects the optimal internal strategy for AdaptiveFileAccessor
+/// based on file characteristics. It handles validation, compression detection, and
+/// strategy selection to provide the best performance for each file.
 ///
 /// # Strategy Selection
-/// - Files < 10MB (50MB on macOS): InMemoryFileAccessor
-/// - Files ≥ 10MB: MmapFileAccessor
-/// - Future: Compressed files will get specialized handling
+/// - Files < 50MB: In-memory (`ByteSource::InMemory`)
+/// - Files ≥ 50MB: Memory mapping (`ByteSource::MemoryMapped`)
+/// - Compressed files: Automatic decompression with size-based strategy
 ///
 /// # Validation
 /// All files undergo validation before accessor creation:
@@ -34,141 +31,175 @@ use std::path::Path;
 pub struct FileAccessorFactory;
 
 impl FileAccessorFactory {
-    /// Size threshold for choosing between in-memory and mmap
+    /// Size threshold for choosing between in-memory and memory-mapped strategies
     ///
-    /// Files smaller than this are loaded entirely into memory for fast access.
-    /// Files larger than this use memory mapping for memory efficiency.
-    #[cfg(not(target_os = "macos"))]
-    const SMALL_FILE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10MB
+    /// Files smaller than this threshold are loaded into memory (`ByteSource::InMemory`).
+    /// Files larger than this threshold use memory mapping (`ByteSource::MemoryMapped`).
+    const MEMORY_THRESHOLD: u64 = 50 * 1024 * 1024; // 50MB
 
-    /// Platform-specific threshold for macOS
-    ///
-    /// macOS has different mmap performance characteristics due to its
-    /// unified buffer cache, so we use a larger threshold to prefer
-    /// in-memory access for medium-sized files.
-    #[cfg(target_os = "macos")]
-    const MACOS_THRESHOLD: u64 = 50 * 1024 * 1024; // 50MB
-
-    /// Create the appropriate FileAccessor for a given file
+    /// Create an AdaptiveFileAccessor with the optimal strategy for the given file
     ///
     /// # Arguments
     /// * `path` - Path to the file to open
     ///
     /// # Returns
-    /// * `Box<dyn FileAccessor>` - Appropriate implementation for the file
+    /// * `AdaptiveFileAccessor` - Configured with the appropriate `ByteSource` strategy
     ///
-    /// # Strategy
+    /// # Process
     /// 1. Validate file (existence, permissions, reasonable size)
-    /// 2. Detect compression format and handle transparently if compressed
-    /// 3. Choose implementation based on file size and platform for uncompressed files
+    /// 2. Detect and handle compression transparently
+    /// 3. Select `ByteSource` strategy based on file size
     ///
     /// # Errors
     /// * File validation errors (non-existent, empty, too large, not readable)
-    /// * Compression detection errors
-    /// * Accessor creation errors (memory mapping failures, etc.)
-    ///
-    /// # Performance
-    /// * Validation: O(1) - just metadata and header reads
-    /// * InMemory creation: O(n) - loads entire file
-    /// * Mmap creation: O(1) - just sets up mapping
-    pub async fn create(path: &Path) -> Result<Box<dyn FileAccessor>> {
+    /// * Compression detection/decompression errors
+    /// * Memory mapping failures
+    pub async fn create(path: &Path) -> Result<AdaptiveFileAccessor> {
         // 1. Validate file first (existence, permissions, reasonable size)
         validate_file_path(path)?;
 
-        // 2. Get file metadata for size-based decision
-        let metadata = tokio::fs::metadata(path).await.map_err(|e| {
-            RllessError::file_error(
-                format!("Failed to get file metadata: {}", path.display()),
-                e,
-            )
-        })?;
+        // 2. Detect compression format
+        let compression_type = detect_compression(path).await?;
 
-        let file_size = metadata.len();
+        if compression_type.is_compressed() {
+            // Handle compressed files
+            match decompress_file(path, compression_type).await? {
+                DecompressionResult::InMemory(data) => {
+                    let file_size = data.len() as u64;
+                    let source = ByteSource::InMemory(data);
+                    Ok(AdaptiveFileAccessor::new(
+                        source,
+                        file_size,
+                        path.to_path_buf(),
+                    ))
+                }
+                DecompressionResult::TempFile(temp_file) => {
+                    // Memory map the temp file
+                    let temp_file_handle = temp_file
+                        .reopen()
+                        .map_err(|e| RllessError::file_error("Failed to reopen temp file", e))?;
 
-        // 3. Detect compression and handle compressed files transparently
-        let compression = detect_compression(path).await?;
-        if compression != CompressionType::None {
-            // Handle compressed files with transparent decompression
-            return Ok(Box::new(
-                CompressedFileAccessor::new(path, compression).await?,
-            ));
-        }
+                    let mmap = unsafe {
+                        Mmap::map(&temp_file_handle).map_err(|e| {
+                            RllessError::file_error("Failed to memory map temp file", e)
+                        })?
+                    };
 
-        // 4. Choose implementation based on file size and platform
-        let threshold = Self::get_threshold();
-
-        if file_size < threshold {
-            // Small file: load into memory for fast access
-            let content = tokio::fs::read(path).await.map_err(|e| {
-                RllessError::file_error(
-                    format!("Failed to read file content: {}", path.display()),
-                    e,
-                )
-            })?;
-            let accessor = InMemoryFileAccessor::new(content, path.to_path_buf());
-            Ok(Box::new(accessor))
+                    let file_size = mmap.len() as u64;
+                    let source = ByteSource::Compressed {
+                        mmap,
+                        _temp_file: temp_file,
+                    };
+                    Ok(AdaptiveFileAccessor::new(
+                        source,
+                        file_size,
+                        path.to_path_buf(),
+                    ))
+                }
+            }
         } else {
-            // Large file: use memory mapping for memory efficiency
-            let accessor = MmapFileAccessor::new(path).await?;
-            Ok(Box::new(accessor))
+            // Handle uncompressed files - use size-based strategy
+            let file = File::open(path).map_err(|e| {
+                RllessError::file_error(format!("Failed to open file: {}", path.display()), e)
+            })?;
+
+            let metadata = file
+                .metadata()
+                .map_err(|e| RllessError::file_error("Failed to get file metadata", e))?;
+            let file_size = metadata.len();
+
+            if file_size < Self::MEMORY_THRESHOLD {
+                // Small file: load into memory
+                let mut content = Vec::new();
+                let mut file = file;
+                file.read_to_end(&mut content)
+                    .map_err(|e| RllessError::file_error("Failed to read file", e))?;
+
+                let source = ByteSource::InMemory(content);
+                Ok(AdaptiveFileAccessor::new(
+                    source,
+                    file_size,
+                    path.to_path_buf(),
+                ))
+            } else {
+                // Large file: use memory mapping
+                let mmap = unsafe {
+                    Mmap::map(&file).map_err(|e| {
+                        RllessError::file_error(
+                            format!("Failed to memory map file: {}", path.display()),
+                            e,
+                        )
+                    })?
+                };
+
+                let source = ByteSource::MemoryMapped(mmap);
+                Ok(AdaptiveFileAccessor::new(
+                    source,
+                    file_size,
+                    path.to_path_buf(),
+                ))
+            }
         }
     }
 
-    /// Get the size threshold for the current platform
+    /// Create AdaptiveFileAccessor with explicit strategy (for testing)
     ///
-    /// # Returns
-    /// * Threshold in bytes for choosing between in-memory and mmap
-    ///
-    /// # Platform Differences
-    /// * macOS: 50MB (unified buffer cache makes mmap less efficient for medium files)
-    /// * Other platforms: 10MB (mmap is generally efficient)
-    fn get_threshold() -> u64 {
-        #[cfg(target_os = "macos")]
-        {
-            Self::MACOS_THRESHOLD
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self::SMALL_FILE_THRESHOLD
-        }
-    }
-
-    /// Create with explicit strategy (for testing and special cases)
-    ///
-    /// This method bypasses the automatic strategy selection and forces
-    /// a specific implementation. Useful for testing and edge cases.
+    /// Bypasses automatic strategy selection and forces a specific `ByteSource`.
+    /// Useful for testing different strategies on the same file.
     ///
     /// # Arguments
     /// * `path` - Path to the file to open
-    /// * `force_mmap` - If true, use MmapFileAccessor; if false, use InMemoryFileAccessor
+    /// * `force_mmap` - If true, use `ByteSource::MemoryMapped`; if false, use `ByteSource::InMemory`
     ///
     /// # Returns
-    /// * `Box<dyn FileAccessor>` - Requested implementation
-    ///
-    /// # Note
-    /// File validation is still performed regardless of strategy.
+    /// * `AdaptiveFileAccessor` - Configured with the requested strategy
     #[cfg(test)]
     pub async fn create_with_strategy(
         path: &Path,
         force_mmap: bool,
-    ) -> Result<Box<dyn FileAccessor>> {
+    ) -> Result<AdaptiveFileAccessor> {
         // Always validate, even when forcing strategy
         validate_file_path(path)?;
 
+        let file = File::open(path).map_err(|e| {
+            RllessError::file_error(format!("Failed to open file: {}", path.display()), e)
+        })?;
+
+        let metadata = file
+            .metadata()
+            .map_err(|e| RllessError::file_error("Failed to get file metadata", e))?;
+        let file_size = metadata.len();
+
         if force_mmap {
-            Ok(Box::new(MmapFileAccessor::new(path).await?))
-        } else {
-            let content = tokio::fs::read(path).await.map_err(|e| {
-                RllessError::file_error(
-                    format!("Failed to read file content: {}", path.display()),
-                    e,
-                )
-            })?;
-            Ok(Box::new(InMemoryFileAccessor::new(
-                content,
+            // Force memory mapping
+            let mmap = unsafe {
+                Mmap::map(&file).map_err(|e| {
+                    RllessError::file_error(
+                        format!("Failed to memory map file: {}", path.display()),
+                        e,
+                    )
+                })?
+            };
+
+            let source = ByteSource::MemoryMapped(mmap);
+            Ok(AdaptiveFileAccessor::new(
+                source,
+                file_size,
                 path.to_path_buf(),
-            )))
+            ))
+        } else {
+            // Force in-memory
+            let mut content = Vec::new();
+            let mut file = file;
+            file.read_to_end(&mut content)
+                .map_err(|e| RllessError::file_error("Failed to read file", e))?;
+
+            let source = ByteSource::InMemory(content);
+            Ok(AdaptiveFileAccessor::new(
+                source,
+                file_size,
+                path.to_path_buf(),
+            ))
         }
     }
 }
@@ -176,7 +207,12 @@ impl FileAccessorFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_handler::accessor::FileAccessor;
+    use crate::file_handler::adaptive::ByteSource;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::NamedTempFile;
 
     /// Create a test file with specific content
@@ -204,33 +240,38 @@ mod tests {
             .await
             .unwrap();
 
-        // InMemoryFileAccessor always knows total lines
-        assert!(accessor.total_lines().is_some());
-
         // Test basic functionality
-        let first_line = accessor.read_line(0).await.unwrap();
-        assert_eq!(first_line, "line1");
+        let lines = accessor.read_from_byte(0, 1).await.unwrap();
+        assert_eq!(lines[0], "line1");
+
+        // Verify it's using InMemory strategy
+        match &accessor.source {
+            ByteSource::InMemory(_) => {} // Expected
+            _ => panic!("Small file should use InMemory variant"),
+        }
     }
 
     #[tokio::test]
     async fn test_factory_creates_mmap_for_large_files() {
-        // Create a file larger than threshold (15MB)
-        let large_file = create_test_file_with_size(15 * 1024 * 1024);
+        // Create a file larger than threshold (60MB)
+        let large_file = create_test_file_with_size(60 * 1024 * 1024);
 
         let accessor = FileAccessorFactory::create(large_file.path())
             .await
             .unwrap();
 
-        // MmapFileAccessor returns None initially for total_lines (lazy indexing)
-        // Note: This might be Some if the file gets fully indexed quickly
+        // Verify it's using MemoryMapped strategy for large files
+        match &accessor.source {
+            ByteSource::MemoryMapped(_) => {} // Expected
+            _ => panic!("Large file should use MemoryMapped variant"),
+        }
+
         let file_size = accessor.file_size();
-        assert!(file_size > 10 * 1024 * 1024);
+        assert_eq!(file_size, 60 * 1024 * 1024);
     }
 
     #[tokio::test]
     async fn test_factory_validates_file_before_creation() {
-        use std::path::PathBuf;
-
         // Test with non-existent file
         let non_existent = PathBuf::from("/this/file/does/not/exist.log");
         let result = FileAccessorFactory::create(&non_existent).await;
@@ -261,15 +302,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_factory_get_threshold() {
-        let threshold = FileAccessorFactory::get_threshold();
-
-        #[cfg(target_os = "macos")]
-        assert_eq!(threshold, 50 * 1024 * 1024);
-
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(threshold, 10 * 1024 * 1024);
+    #[test]
+    fn test_factory_memory_threshold() {
+        // Test that the threshold constant is as expected
+        assert_eq!(FileAccessorFactory::MEMORY_THRESHOLD, 50 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -287,19 +323,26 @@ mod tests {
             .await
             .unwrap();
 
+        // Verify forced strategies
+        match &mmap_accessor.source {
+            ByteSource::MemoryMapped(_) => {} // Expected
+            _ => panic!("Should be forced to MemoryMapped"),
+        }
+
+        match &memory_accessor.source {
+            ByteSource::InMemory(_) => {} // Expected
+            _ => panic!("Should be forced to InMemory"),
+        }
+
         // Both should work and return same content
-        let mmap_line = mmap_accessor.read_line(0).await.unwrap();
-        let memory_line = memory_accessor.read_line(0).await.unwrap();
-        assert_eq!(mmap_line, memory_line);
-        assert_eq!(mmap_line, "line1");
+        let mmap_lines = mmap_accessor.read_from_byte(0, 1).await.unwrap();
+        let memory_lines = memory_accessor.read_from_byte(0, 1).await.unwrap();
+        assert_eq!(mmap_lines[0], memory_lines[0]);
+        assert_eq!(mmap_lines[0], "line1");
     }
 
     #[tokio::test]
     async fn test_compression_detection_integration() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
-
         // Create actual compressed data
         let original_text = "line 1\nline 2\nline 3\nThis is a test file with multiple lines\n";
 
@@ -316,33 +359,37 @@ mod tests {
         let accessor = FileAccessorFactory::create(temp_file.path()).await.unwrap();
 
         // Should be able to read the decompressed content
-        let first_line = accessor.read_line(0).await.unwrap();
-        assert_eq!(first_line, "line 1");
-
-        let second_line = accessor.read_line(1).await.unwrap();
-        assert_eq!(second_line, "line 2");
+        let lines = accessor.read_from_byte(0, 2).await.unwrap();
+        assert_eq!(lines[0], "line 1");
+        assert_eq!(lines[1], "line 2");
 
         // File size should be the uncompressed size
         assert!(accessor.file_size() > 0);
-        assert_eq!(accessor.total_lines(), Some(4));
     }
 
     #[tokio::test]
     async fn test_boundary_file_sizes() {
-        let threshold = FileAccessorFactory::get_threshold();
+        let threshold = FileAccessorFactory::MEMORY_THRESHOLD;
 
         // File just under threshold should use InMemory
         let small_file = create_test_file_with_size((threshold - 1) as usize);
         let small_accessor = FileAccessorFactory::create(small_file.path())
             .await
             .unwrap();
-        assert!(small_accessor.total_lines().is_some()); // InMemory characteristic
+        match &small_accessor.source {
+            ByteSource::InMemory(_) => {} // Expected
+            _ => panic!("Small file should use InMemory variant"),
+        }
 
         // File at threshold should use Mmap
         let large_file = create_test_file_with_size(threshold as usize);
         let large_accessor = FileAccessorFactory::create(large_file.path())
             .await
             .unwrap();
-        assert_eq!(large_accessor.file_size(), threshold); // Should handle exactly threshold size
+        match &large_accessor.source {
+            ByteSource::MemoryMapped(_) => {} // Expected
+            _ => panic!("Large file should use MemoryMapped variant"),
+        }
+        assert_eq!(large_accessor.file_size(), threshold);
     }
 }

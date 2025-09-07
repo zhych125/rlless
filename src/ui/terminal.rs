@@ -64,14 +64,18 @@ impl TerminalUI {
             .visible_lines
             .iter()
             .enumerate()
-            .map(|(idx, line)| {
-                let line_number = view_state.viewport_top + idx as u64;
+            .map(|(viewport_line_idx, line)| {
+                // Get search highlights for this viewport-relative line (if any)
+                let highlights = view_state
+                    .search_highlights
+                    .get(viewport_line_idx)
+                    .map(|ranges| ranges.as_slice())
+                    .unwrap_or(&[]);
 
-                // Check for search highlights on this line
-                if let Some(highlights) = view_state.search_highlights.get(&line_number) {
-                    Self::create_highlighted_line_with_theme(line.as_ref(), highlights, theme)
+                if highlights.is_empty() {
+                    Line::from(line.as_str())
                 } else {
-                    Line::from(line.as_ref())
+                    Self::create_highlighted_line_with_theme(line.as_str(), highlights, theme)
                 }
             })
             .collect();
@@ -122,9 +126,11 @@ impl TerminalUI {
         view_state: &ViewState,
         theme: &ColorTheme,
     ) {
-        let status_text = view_state
-            .status_line
-            .format_status_line(&view_state.file_info.filename());
+        let status_text = view_state.status_line.format_status_line(
+            &view_state.filename(),
+            view_state.viewport_top_byte,
+            view_state.file_size.unwrap_or(0),
+        );
 
         // Use theme colors for status line directly
         let status_style = Style::default().bg(theme.status_bg).fg(theme.status_fg);

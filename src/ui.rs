@@ -13,10 +13,7 @@ pub mod theme;
 pub use input_state::{InputAction, InputState, InputStateMachine, SearchDirection};
 pub use ratatui::style::{Color, Style};
 pub use renderer::UIRenderer;
-pub use state::{
-    DisplayConfig, DisplayMode, FileDisplayInfo, HighlightStyle, LineDisplayUtils, PositionInfo,
-    StatusLine, ViewState, ViewportInfo,
-};
+pub use state::{DisplayMode, StatusLine, ViewState};
 pub use terminal::TerminalUI;
 pub use theme::ColorTheme;
 

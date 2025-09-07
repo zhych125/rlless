@@ -1,14 +1,11 @@
-//! Compression format detection and transparent decompression for file access.
+//! Compression format detection and decompression utilities.
 //!
 //! This module provides compression format detection using magic numbers (file signatures)
-//! and transparent decompression support for common compression formats used with log files.
+//! and decompression utilities for common compression formats used with log files.
 
 use crate::error::{Result, RllessError};
-use crate::file_handler::{FileAccessor, InMemoryFileAccessor, MmapFileAccessor};
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
-use async_trait::async_trait;
-use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tempfile::NamedTempFile;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -115,124 +112,47 @@ fn detect_by_extension(path: &Path) -> Option<CompressionType> {
     }
 }
 
-/// FileAccessor implementation that handles compressed files transparently
-pub struct CompressedFileAccessor {
-    /// Inner accessor (either InMemory or Mmap)
-    inner_accessor: Box<dyn FileAccessor>,
-    /// Compression format of the original file
-    compression_type: CompressionType,
-    /// Path to the original compressed file
-    original_path: PathBuf,
-    /// Temporary file handle (kept alive for mmap)
-    _temp_file: Option<NamedTempFile>,
-    /// Size of the compressed file
-    compressed_size: u64,
+/// Decompression result that can be either in-memory or a temp file
+pub enum DecompressionResult {
+    /// Small file decompressed to memory
+    InMemory(Vec<u8>),
+    /// Large file decompressed to temp file
+    TempFile(NamedTempFile),
 }
 
-impl CompressedFileAccessor {
-    /// Create a new CompressedFileAccessor
-    ///
-    /// For small compressed files (<10MB), decompresses to memory.
-    /// For large files, decompresses to a temp file and mmaps it.
-    pub async fn new(path: &Path, compression: CompressionType) -> Result<Self> {
-        if compression == CompressionType::None {
-            return Err(RllessError::file_error(
-                "CompressedFileAccessor called with no compression",
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "No compression type"),
-            ));
-        }
-
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|e| RllessError::file_error("Failed to read compressed file metadata", e))?;
-        let compressed_size = metadata.len();
-
-        // Threshold for in-memory vs temp file decompression
-        const MEMORY_THRESHOLD: u64 = 10_000_000; // 10MB
-
-        let (inner_accessor, temp_file): (Box<dyn FileAccessor>, Option<NamedTempFile>) =
-            if compressed_size < MEMORY_THRESHOLD {
-                // Small file: decompress to memory
-                let data = decompress_to_memory(path, compression).await?;
-                let accessor = InMemoryFileAccessor::new(data, path.to_path_buf());
-                (Box::new(accessor), None)
-            } else {
-                // Large file: decompress to temp file and mmap
-                let temp_file = decompress_to_temp_file(path, compression).await?;
-                let temp_path = temp_file.path();
-                let accessor = MmapFileAccessor::new(temp_path).await?;
-                (Box::new(accessor), Some(temp_file))
-            };
-
-        Ok(Self {
-            inner_accessor,
-            compression_type: compression,
-            original_path: path.to_path_buf(),
-            _temp_file: temp_file,
-            compressed_size,
-        })
+/// Decompress a file using the appropriate strategy based on file size
+///
+/// # Strategy
+/// - Files < 10MB compressed: decompress to memory
+/// - Files ≥ 10MB compressed: decompress to temp file
+pub async fn decompress_file(
+    path: &Path,
+    compression: CompressionType,
+) -> Result<DecompressionResult> {
+    if !compression.is_compressed() {
+        return Err(RllessError::file_error(
+            "decompress_file called with no compression",
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "No compression type"),
+        ));
     }
 
-    /// Get the compression type
-    pub fn compression_type(&self) -> CompressionType {
-        self.compression_type
-    }
+    // Get compressed file size
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| RllessError::file_error("Failed to get file metadata", e))?;
+    let compressed_size = metadata.len();
 
-    /// Get the compressed file size
-    pub fn compressed_size(&self) -> u64 {
-        self.compressed_size
-    }
+    // Threshold for in-memory vs temp file decompression
+    const MEMORY_THRESHOLD: u64 = 10_000_000; // 10MB compressed size
 
-    /// Get the path to the original compressed file
-    pub fn original_path(&self) -> &Path {
-        &self.original_path
-    }
-}
-
-#[async_trait]
-impl FileAccessor for CompressedFileAccessor {
-    async fn read_line(&self, line_number: u64) -> Result<Cow<'_, str>> {
-        self.inner_accessor.read_line(line_number).await
-    }
-
-    async fn read_lines_range(&self, start: u64, count: u64) -> Result<Vec<Cow<'_, str>>> {
-        self.inner_accessor.read_lines_range(start, count).await
-    }
-
-    async fn find_next_match(
-        &self,
-        start_line: u64,
-        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<u64>> {
-        self.inner_accessor
-            .find_next_match(start_line, search_fn)
-            .await
-    }
-
-    async fn find_prev_match(
-        &self,
-        start_line: u64,
-        search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
-    ) -> Result<Option<u64>> {
-        self.inner_accessor
-            .find_prev_match(start_line, search_fn)
-            .await
-    }
-
-    fn file_size(&self) -> u64 {
-        self.inner_accessor.file_size()
-    }
-
-    fn total_lines(&self) -> Option<u64> {
-        self.inner_accessor.total_lines()
-    }
-
-    fn file_path(&self) -> &std::path::Path {
-        &self.original_path
-    }
-
-    fn supports_parallel(&self) -> bool {
-        self.inner_accessor.supports_parallel()
+    if compressed_size < MEMORY_THRESHOLD {
+        // Small compressed file: decompress to memory
+        let data = decompress_to_memory(path, compression).await?;
+        Ok(DecompressionResult::InMemory(data))
+    } else {
+        // Large compressed file: decompress to temp file
+        let temp_file = decompress_to_temp_file(path, compression).await?;
+        Ok(DecompressionResult::TempFile(temp_file))
     }
 }
 
@@ -308,7 +228,10 @@ async fn decompress_to_temp_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use std::io::Write;
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn test_detect_gzip_magic() {
@@ -397,5 +320,106 @@ mod tests {
 
         let result = detect_compression(&file_path).await.unwrap();
         assert_eq!(result, CompressionType::Gzip);
+    }
+
+    #[tokio::test]
+    async fn test_decompress_file_small_file() {
+        // Create a small gzipped test file
+        let test_data = b"Hello, world!\nThis is a test file.\n";
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut encoder = GzEncoder::new(
+                std::fs::File::create(temp_file.path()).unwrap(),
+                Compression::default(),
+            );
+            encoder.write_all(test_data).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let result = decompress_file(temp_file.path(), CompressionType::Gzip)
+            .await
+            .unwrap();
+
+        match result {
+            DecompressionResult::InMemory(data) => {
+                assert_eq!(data, test_data);
+            }
+            DecompressionResult::TempFile(_) => {
+                panic!("Small file should be decompressed to memory");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_decompress_file_with_no_compression_fails() {
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(temp_file.path(), b"not compressed")
+            .await
+            .unwrap();
+
+        let result = decompress_file(temp_file.path(), CompressionType::None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_decompress_to_memory_gzip() {
+        // Create a gzipped test file
+        let test_data = b"Test content for gzip decompression";
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut encoder = GzEncoder::new(
+                std::fs::File::create(temp_file.path()).unwrap(),
+                Compression::default(),
+            );
+            encoder.write_all(test_data).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let result = decompress_to_memory(temp_file.path(), CompressionType::Gzip)
+            .await
+            .unwrap();
+        assert_eq!(result, test_data);
+    }
+
+    #[tokio::test]
+    async fn test_decompress_to_temp_file() {
+        // Create a gzipped test file
+        let test_data = b"Test content for temp file decompression";
+        let compressed_file = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut encoder = GzEncoder::new(
+                std::fs::File::create(compressed_file.path()).unwrap(),
+                Compression::default(),
+            );
+            encoder.write_all(test_data).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let temp_file = decompress_to_temp_file(compressed_file.path(), CompressionType::Gzip)
+            .await
+            .unwrap();
+
+        // Read the temp file content
+        let mut decompressed_content = Vec::new();
+        let mut file = tokio::fs::File::open(temp_file.path()).await.unwrap();
+        file.read_to_end(&mut decompressed_content).await.unwrap();
+
+        assert_eq!(decompressed_content, test_data);
+    }
+
+    #[test]
+    fn test_decompression_result_variants() {
+        let data = vec![1, 2, 3];
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+
+        match DecompressionResult::InMemory(data.clone()) {
+            DecompressionResult::InMemory(d) => assert_eq!(d, data),
+            DecompressionResult::TempFile(_) => panic!("Wrong variant"),
+        }
+
+        match DecompressionResult::TempFile(temp_file) {
+            DecompressionResult::TempFile(_) => {} // Success
+            DecompressionResult::InMemory(_) => panic!("Wrong variant"),
+        }
     }
 }

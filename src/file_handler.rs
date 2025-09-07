@@ -5,29 +5,19 @@
 //!
 //! The module is organized into focused sub-modules:
 //! - `accessor`: Core FileAccessor trait and access strategies
-//! - `compression`: Compression format detection using magic numbers
-//! - `factory`: Factory for automatic accessor selection based on file characteristics
-//! - `in_memory`: In-memory file accessor with zero-copy line extraction
-//! - `mmap`: Memory-mapped file accessor for large files with lazy indexing
+//! - `adaptive`: Adaptive file accessor supporting in-memory, mmap, and compressed files
+//! - `compression`: Compression format detection and decompression utilities
 //! - `validation`: File validation utilities
-//! - `line_index`: SIMD-optimized line boundary detection
 
 pub mod accessor;
+pub mod adaptive;
 pub mod compression;
 pub mod factory;
-pub mod in_memory;
-pub mod line_index;
-pub mod mmap;
 pub mod validation;
 
 // Re-export public API for convenient access
-pub use accessor::{AccessStrategy, FileAccessor};
-pub use compression::{detect_compression, CompressedFileAccessor, CompressionType};
+pub use accessor::FileAccessor;
+pub use adaptive::AdaptiveFileAccessor;
+pub use compression::{decompress_file, detect_compression, DecompressionResult};
 pub use factory::FileAccessorFactory;
-pub use in_memory::InMemoryFileAccessor;
-pub use mmap::MmapFileAccessor;
 pub use validation::validate_file_path;
-
-// Re-export test utilities for integration tests
-#[cfg(test)]
-pub use accessor::tests::MockFileAccessor;
