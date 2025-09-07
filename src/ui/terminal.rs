@@ -165,13 +165,21 @@ impl UIRenderer for TerminalUI {
         let timeout_duration = timeout.unwrap_or(Duration::from_millis(100));
 
         if event::poll(timeout_duration)? {
-            if let Event::Key(key_event) = event::read()? {
-                let action = self.input_machine.handle_key_event(key_event);
-                // Only return non-NoAction results
-                return Ok(match action {
-                    InputAction::NoAction => None,
-                    other => Some(other),
-                });
+            match event::read()? {
+                Event::Key(key_event) => {
+                    let action = self.input_machine.handle_key_event(key_event);
+                    // Only return non-NoAction results
+                    return Ok(match action {
+                        InputAction::NoAction => None,
+                        other => Some(other),
+                    });
+                }
+                Event::Resize(width, height) => {
+                    return Ok(Some(InputAction::Resize { width, height }));
+                }
+                _ => {
+                    // Ignore other events (mouse, etc.)
+                }
             }
         }
 

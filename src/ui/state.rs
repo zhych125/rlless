@@ -88,6 +88,24 @@ impl ViewState {
         self.search_highlights = highlights;
     }
 
+    /// Update terminal dimensions and mark that content needs to be recalculated
+    /// Returns true if dimensions actually changed
+    pub fn update_terminal_size(&mut self, width: u16, height: u16) -> bool {
+        let changed = self.viewport_width != width || self.viewport_height != height;
+
+        if changed {
+            self.viewport_width = width;
+            self.viewport_height = height;
+            // Clear visible content - it will need to be recalculated with new dimensions
+            self.visible_lines.clear();
+            self.search_highlights.clear();
+            // Reset EOF state since viewport size changed
+            self.at_eof = false;
+        }
+
+        changed
+    }
+
     /// Format the complete status line for this view state
     pub fn format_status_line(&self) -> String {
         self.status_line.format_status_line(
@@ -283,5 +301,42 @@ mod tests {
         status.clear_search_prompt();
         let formatted = status.format_status_line("test.log", 512, 1024, true);
         assert_eq!(formatted, "test.log | EOD");
+    }
+
+    #[test]
+    fn test_terminal_resize() {
+        let path = PathBuf::from("/test/file.log");
+        let mut state = ViewState::new(path, 80, 24);
+
+        // Add some mock visible content
+        state.visible_lines = vec!["line1".to_string(), "line2".to_string()];
+        state.search_highlights = vec![vec![(0, 4)], vec![]]; // highlight "line" in first line
+
+        // Test resize to same dimensions - should return false
+        assert!(!state.update_terminal_size(80, 24));
+        assert_eq!(state.viewport_width, 80);
+        assert_eq!(state.viewport_height, 24);
+        // Content should remain unchanged
+        assert_eq!(state.visible_lines.len(), 2);
+        assert_eq!(state.search_highlights.len(), 2);
+
+        // Test resize to different dimensions - should return true
+        assert!(state.update_terminal_size(120, 30));
+        assert_eq!(state.viewport_width, 120);
+        assert_eq!(state.viewport_height, 30);
+        // Content should be cleared for recalculation
+        assert_eq!(state.visible_lines.len(), 0);
+        assert_eq!(state.search_highlights.len(), 0);
+        assert!(!state.at_eof); // EOF state should be reset
+
+        // Test width-only change
+        state.visible_lines = vec!["test".to_string()];
+        assert!(state.update_terminal_size(100, 30));
+        assert_eq!(state.visible_lines.len(), 0);
+
+        // Test height-only change
+        state.visible_lines = vec!["test".to_string()];
+        assert!(state.update_terminal_size(100, 25));
+        assert_eq!(state.visible_lines.len(), 0);
     }
 }

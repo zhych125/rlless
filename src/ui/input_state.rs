@@ -57,6 +57,12 @@ pub enum InputAction {
     NextMatch,
     PreviousMatch,
 
+    // Terminal events
+    Resize {
+        width: u16,
+        height: u16,
+    },
+
     // State management
     NoAction,
     InvalidInput,
@@ -653,5 +659,36 @@ mod tests {
     fn test_search_direction_chars() {
         assert_eq!(SearchDirection::Forward.to_char(), '/');
         assert_eq!(SearchDirection::Backward.to_char(), '?');
+    }
+
+    #[test]
+    fn test_resize_action() {
+        // Test that Resize action can be created and compared
+        let resize_action = InputAction::Resize {
+            width: 120,
+            height: 30,
+        };
+
+        match resize_action {
+            InputAction::Resize { width, height } => {
+                assert_eq!(width, 120);
+                assert_eq!(height, 30);
+            }
+            _ => panic!("Expected Resize action"),
+        }
+
+        // Test equality
+        let resize_action_2 = InputAction::Resize {
+            width: 120,
+            height: 30,
+        };
+        assert_eq!(resize_action, resize_action_2);
+
+        // Test inequality
+        let resize_action_3 = InputAction::Resize {
+            width: 80,
+            height: 24,
+        };
+        assert_ne!(resize_action, resize_action_3);
     }
 }

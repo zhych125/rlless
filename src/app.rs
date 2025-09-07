@@ -382,6 +382,16 @@ impl Application {
             }
 
             // Other actions - simplified for essential functionality only
+            InputAction::Resize { width, height } => {
+                // Update terminal size and recalculate view if dimensions changed
+                if view_state.update_terminal_size(width, height) {
+                    // Dimensions changed - recalculate content for new viewport size
+                    // This will read new lines from file_accessor and recompute highlights if search is active
+                    self.update_view_content(view_state, self.search_state.is_some())
+                        .await?;
+                }
+                Ok(true)
+            }
             InputAction::NoAction => Ok(true),
             InputAction::InvalidInput => {
                 // Just ignore invalid input - no error message needed
