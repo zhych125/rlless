@@ -32,11 +32,14 @@ grep-searcher = "0.1"
 grep-matcher = "0.1"
 grep-regex = "0.1"
 
-# Terminal UI framework (ratatui exports crossterm, so we don't need separate crossterm)
+# Terminal UI framework with async event support
 ratatui = { version = "0.27", features = ["crossterm"] }
 
 # Async traits support
 async-trait = "0.1"
+# Async utilities for event stream handling
+futures = "0.3"
+tokio-stream = "0.1"
 
 # Command-line argument parsing
 clap = { version = "4.5", features = ["derive"] }
