@@ -36,6 +36,7 @@ struct WorkerState {
     file_accessor: Arc<dyn FileAccessor>,
     search_engine: RipgrepEngine,
     context: Option<SearchContext>,
+    last_highlight: Option<Arc<SearchHighlightSpec>>,
 }
 
 impl WorkerState {
@@ -44,6 +45,7 @@ impl WorkerState {
             file_accessor,
             search_engine,
             context: None,
+            last_highlight: None,
         }
     }
 
@@ -80,6 +82,10 @@ impl WorkerState {
                     .await,
             ),
             SearchCommand::UpdateSearchContext(new_context) => {
+                self.last_highlight = Some(Arc::new(SearchHighlightSpec {
+                    pattern: Arc::clone(&new_context.pattern),
+                    options: new_context.options.clone(),
+                }));
                 self.context = Some(new_context);
                 HandlerOutcome::continue_without_response()
             }
@@ -88,7 +94,7 @@ impl WorkerState {
     }
 
     async fn load_viewport(
-        &self,
+        &mut self,
         request_id: RequestId,
         top: ViewportRequest,
         page_lines: usize,
@@ -99,7 +105,14 @@ impl WorkerState {
             .file_accessor
             .read_from_byte(target_byte, page_lines)
             .await?;
-        let highlights = if let Some(spec) = highlights {
+        let highlight_spec = if let Some(spec) = highlights {
+            self.last_highlight = Some(Arc::clone(&spec));
+            Some(spec)
+        } else {
+            self.last_highlight.clone()
+        };
+
+        let highlights = if let Some(spec) = highlight_spec {
             self.compute_highlights(spec.as_ref(), &lines)?
         } else {
             vec![Vec::new(); lines.len()]
@@ -149,6 +162,10 @@ impl WorkerState {
         match search_future.await {
             Ok(Some(byte)) => {
                 new_context.last_match_byte = Some(byte);
+                self.last_highlight = Some(Arc::new(SearchHighlightSpec {
+                    pattern: Arc::clone(&new_context.pattern),
+                    options: new_context.options.clone(),
+                }));
                 self.context = Some(new_context);
                 SearchResponse::SearchCompleted {
                     request_id,
@@ -157,6 +174,10 @@ impl WorkerState {
                 }
             }
             Ok(None) => {
+                self.last_highlight = Some(Arc::new(SearchHighlightSpec {
+                    pattern: Arc::clone(&new_context.pattern),
+                    options: new_context.options.clone(),
+                }));
                 self.context = Some(new_context);
                 SearchResponse::SearchCompleted {
                     request_id,
@@ -215,6 +236,10 @@ impl WorkerState {
             Ok(Some(byte)) => {
                 if let Some(ctx) = self.context.as_mut() {
                     ctx.last_match_byte = Some(byte);
+                    self.last_highlight = Some(Arc::new(SearchHighlightSpec {
+                        pattern: Arc::clone(&ctx.pattern),
+                        options: ctx.options.clone(),
+                    }));
                 }
                 SearchResponse::SearchCompleted {
                     request_id,

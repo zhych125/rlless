@@ -32,9 +32,9 @@ pub struct SearchOptions {
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
-            case_sensitive: false,                  // less is case-insensitive by default
-            whole_word: false,                      // less doesn't use whole word matching
-            regex_mode: false,                      // less uses literal string matching by default
+            case_sensitive: true,                   // less matches case by default
+            whole_word: false,                      // whole word matching opt-in via flags
+            regex_mode: true, // less treats search patterns as regex by default
             timeout: Some(Duration::from_secs(10)), // 10 second default timeout
         }
     }

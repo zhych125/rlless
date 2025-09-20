@@ -13,7 +13,7 @@ use crate::render::protocol::{RequestId, SearchCommand, SearchResponse, Viewport
 use crate::render::service::{RenderCoordinator, RenderLoopState};
 use crate::render::ui::{UIRenderer, ViewState};
 use crate::search::worker::search_worker_loop;
-use crate::search::RipgrepEngine;
+use crate::search::{RipgrepEngine, SearchOptions};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,13 +29,17 @@ pub struct Application {
 
 impl Application {
     /// Create application by initializing and wiring components together
-    pub async fn new(file_path: &Path, ui_renderer: Box<dyn UIRenderer>) -> Result<Self> {
+    pub async fn new(
+        file_path: &Path,
+        ui_renderer: Box<dyn UIRenderer>,
+        search_options: SearchOptions,
+    ) -> Result<Self> {
         let file_accessor: Arc<dyn FileAccessor> =
             Arc::new(FileAccessorFactory::create(file_path).await?);
         Ok(Self {
             file_accessor,
             ui_renderer,
-            render_state: RenderLoopState::new(),
+            render_state: RenderLoopState::new(search_options),
         })
     }
 

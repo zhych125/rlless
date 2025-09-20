@@ -17,6 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum InputState {
     Navigation,
     SearchInput { direction: SearchDirection },
+    Command,
 }
 
 /// Direction for forward/backward search.
@@ -71,6 +72,12 @@ pub enum InputAction {
         width: u16,
         height: u16,
     },
+    StartCommand,
+    UpdateCommandBuffer(String),
+    CancelCommand,
+    ExecuteCommand {
+        buffer: String,
+    },
     NoAction,
     InvalidInput,
 }
@@ -79,6 +86,7 @@ pub enum InputAction {
 pub struct InputStateMachine {
     state: InputState,
     search_buffer: String,
+    command_buffer: String,
 }
 
 impl InputStateMachine {
@@ -86,6 +94,7 @@ impl InputStateMachine {
         Self {
             state: InputState::Navigation,
             search_buffer: String::new(),
+            command_buffer: String::new(),
         }
     }
 
@@ -145,6 +154,13 @@ impl InputStateMachine {
                 if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 InputAction::GoToEnd
+            }
+            (InputState::Navigation, KeyCode::Char('-'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.state = InputState::Command;
+                self.command_buffer.clear();
+                InputAction::StartCommand
             }
             (InputState::Navigation, KeyCode::Char('q'), modifiers)
                 if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -225,6 +241,34 @@ impl InputStateMachine {
                 self.search_buffer.clear();
                 InputAction::CancelSearch
             }
+            (InputState::Command, KeyCode::Esc, _)
+            | (InputState::Command, KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.state = InputState::Navigation;
+                self.command_buffer.clear();
+                InputAction::CancelCommand
+            }
+            (InputState::Command, KeyCode::Enter, _) => {
+                let buffer = self.command_buffer.clone();
+                self.state = InputState::Navigation;
+                self.command_buffer.clear();
+                InputAction::ExecuteCommand { buffer }
+            }
+            (InputState::Command, KeyCode::Backspace, _) => {
+                if self.command_buffer.pop().is_some() {
+                    InputAction::UpdateCommandBuffer(self.command_buffer.clone())
+                } else {
+                    self.state = InputState::Navigation;
+                    InputAction::CancelCommand
+                }
+            }
+            (InputState::Command, KeyCode::Char(ch), modifiers)
+                if (ch.is_ascii_graphic() || ch == ' ')
+                    && !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.command_buffer.push(ch);
+                InputAction::UpdateCommandBuffer(self.command_buffer.clone())
+            }
+            (InputState::Command, _, _) => InputAction::InvalidInput,
             _ => InputAction::InvalidInput,
         }
     }
@@ -442,6 +486,78 @@ mod tests {
                     lines: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn command_mode_updates_buffer_and_executes() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('-'))),
+            vec![InputAction::StartCommand]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('i'))),
+            vec![InputAction::UpdateCommandBuffer("i".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Backspace)),
+            vec![InputAction::UpdateCommandBuffer(String::new())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('r'))),
+            vec![InputAction::UpdateCommandBuffer("r".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Enter)),
+            vec![InputAction::ExecuteCommand {
+                buffer: "r".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn command_mode_cancel_clears_buffer() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('-'))),
+            vec![InputAction::StartCommand]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('w'))),
+            vec![InputAction::UpdateCommandBuffer("w".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Esc)),
+            vec![InputAction::CancelCommand]
+        );
+    }
+
+    #[test]
+    fn command_mode_backspace_when_empty_exits() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('-'))),
+            vec![InputAction::StartCommand]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Backspace)),
+            vec![InputAction::CancelCommand]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('-'))),
+            vec![InputAction::StartCommand]
         );
     }
 }

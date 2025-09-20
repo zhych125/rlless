@@ -3,7 +3,8 @@
 //! A fast, memory-efficient terminal log viewer designed to handle extremely large files.
 
 use anyhow::Result;
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
+use rlless::search::SearchOptions;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -24,6 +25,33 @@ async fn main() -> Result<()> {
                 .help("Path to the log file to view")
                 .required(true)
                 .index(1),
+        )
+        .arg(
+            Arg::new("ignore-case")
+                .short('i')
+                .long("ignore-case")
+                .help("Perform case-insensitive searches by default")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("literal")
+                .long("literal")
+                .help("Treat search patterns as literal strings")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("regex")
+                .long("regex")
+                .help("Treat search patterns as regular expressions (default)")
+                .action(ArgAction::SetTrue)
+                .conflicts_with("literal"),
+        )
+        .arg(
+            Arg::new("word")
+                .long("word")
+                .short('w')
+                .help("Match whole words only")
+                .action(ArgAction::SetTrue),
         )
         .get_matches();
 
@@ -47,8 +75,22 @@ async fn main() -> Result<()> {
     use rlless::render::ui::TerminalUI;
     use rlless::Application;
 
+    let mut search_options = SearchOptions::default();
+    if matches.get_flag("ignore-case") {
+        search_options.case_sensitive = false;
+    }
+    if matches.get_flag("literal") {
+        search_options.regex_mode = false;
+    }
+    if matches.get_flag("regex") {
+        search_options.regex_mode = true;
+    }
+    if matches.get_flag("word") {
+        search_options.whole_word = true;
+    }
+
     let ui_renderer = Box::new(TerminalUI::new()?);
-    let mut app = Application::new(&file_path, ui_renderer).await?;
+    let mut app = Application::new(&file_path, ui_renderer, search_options).await?;
 
     app.run().await?;
 

@@ -16,26 +16,75 @@ use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio::time::{self, Duration};
 
 /// Tracks render-related state that must persist across input actions and worker responses.
-#[derive(Default)]
 pub struct RenderLoopState {
     search_state: Option<Arc<SearchHighlightSpec>>,
+    search_options: SearchOptions,
+    pending_options_update: bool,
 }
 
 impl RenderLoopState {
-    pub fn new() -> Self {
-        Self { search_state: None }
+    pub fn new(search_options: SearchOptions) -> Self {
+        Self {
+            search_state: None,
+            search_options,
+            pending_options_update: false,
+        }
     }
 
     pub fn highlight_spec(&self) -> Option<Arc<SearchHighlightSpec>> {
         self.search_state.clone()
     }
 
+    pub fn search_options(&self) -> &SearchOptions {
+        &self.search_options
+    }
+
+    pub fn set_search_options(&mut self, options: SearchOptions) {
+        self.search_options = options;
+        self.refresh_active_search();
+    }
+
     pub fn clear_search(&mut self) {
         self.search_state = None;
+        self.pending_options_update = false;
     }
 
     pub fn set_search(&mut self, search: Arc<SearchHighlightSpec>) {
         self.search_state = Some(search);
+        self.pending_options_update = false;
+    }
+
+    fn refresh_active_search(&mut self) {
+        if let Some(spec) = self.search_state.as_ref() {
+            let updated = Arc::new(SearchHighlightSpec {
+                pattern: Arc::clone(&spec.pattern),
+                options: self.search_options.clone(),
+            });
+            self.search_state = Some(updated);
+        } else {
+            self.pending_options_update = true;
+        }
+    }
+
+    fn search_options_summary(&self) -> String {
+        format!(
+            "search options: case={} regex={} word={}",
+            if self.search_options.case_sensitive {
+                "sensitive"
+            } else {
+                "ignore"
+            },
+            if self.search_options.regex_mode {
+                "on"
+            } else {
+                "off"
+            },
+            if self.search_options.whole_word {
+                "on"
+            } else {
+                "off"
+            }
+        )
     }
 
     fn ensure_active_search(&self, view_state: &mut ViewState) -> bool {
@@ -200,7 +249,7 @@ impl RenderLoopState {
                     return Ok(true);
                 }
 
-                let options = SearchOptions::default();
+                let options = self.search_options.clone();
                 let pattern: Arc<str> = Arc::from(trimmed.to_string());
                 let request_id = *next_request_id;
                 *next_request_id += 1;
@@ -225,6 +274,11 @@ impl RenderLoopState {
             }
             InputAction::NextMatch => {
                 if !self.ensure_active_search(view_state) {
+                    if self.pending_options_update {
+                        view_state
+                            .status_line
+                            .set_message("Search options updated; start a new search.".to_string());
+                    }
                     return Ok(true);
                 }
                 self.queue_match_navigation(
@@ -238,6 +292,11 @@ impl RenderLoopState {
             }
             InputAction::PreviousMatch => {
                 if !self.ensure_active_search(view_state) {
+                    if self.pending_options_update {
+                        view_state
+                            .status_line
+                            .set_message("Search options updated; start a new search.".to_string());
+                    }
                     return Ok(true);
                 }
                 self.queue_match_navigation(
@@ -260,6 +319,84 @@ impl RenderLoopState {
                     )
                     .await?;
                 }
+                Ok(true)
+            }
+            InputAction::StartCommand => {
+                view_state.status_line.set_message("command: -".to_string());
+                Ok(true)
+            }
+            InputAction::UpdateCommandBuffer(buffer) => {
+                view_state.status_line.set_message(if buffer.is_empty() {
+                    "command: -".to_string()
+                } else {
+                    format!("command: -{}", buffer)
+                });
+                Ok(true)
+            }
+            InputAction::CancelCommand => {
+                view_state.status_line.clear_message();
+                Ok(true)
+            }
+            InputAction::ExecuteCommand { buffer } => {
+                if buffer.is_empty() {
+                    view_state
+                        .status_line
+                        .set_message("No command entered".to_string());
+                    return Ok(true);
+                }
+
+                let mut options_changed = false;
+                for flag in buffer.chars() {
+                    match flag {
+                        'i' | 'I' => {
+                            self.search_options.case_sensitive =
+                                !self.search_options.case_sensitive;
+                            options_changed = true;
+                        }
+                        'r' | 'R' => {
+                            if !self.search_options.regex_mode {
+                                self.search_options.regex_mode = true;
+                                options_changed = true;
+                            }
+                        }
+                        'n' | 'N' => {
+                            if self.search_options.regex_mode {
+                                self.search_options.regex_mode = false;
+                                options_changed = true;
+                            }
+                        }
+                        'w' | 'W' => {
+                            self.search_options.whole_word = !self.search_options.whole_word;
+                            options_changed = true;
+                        }
+                        other => {
+                            view_state
+                                .status_line
+                                .set_message(format!("Unknown command flag: {}", other));
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                if options_changed {
+                    self.refresh_active_search();
+                    view_state
+                        .status_line
+                        .set_message(self.search_options_summary());
+                    self.request_viewport(
+                        ViewportRequest::Absolute(view_state.viewport_top_byte),
+                        view_state,
+                        search_tx,
+                        next_request_id,
+                        latest_view_request,
+                    )
+                    .await?;
+                } else {
+                    view_state
+                        .status_line
+                        .set_message("Search options unchanged".to_string());
+                }
+
                 Ok(true)
             }
             InputAction::NoAction | InputAction::InvalidInput => Ok(true),
