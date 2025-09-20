@@ -44,9 +44,10 @@ impl RenderLoopState {
         self.refresh_active_search();
     }
 
-    pub fn clear_search(&mut self) {
+    pub fn clear_search(&mut self, view_state: &mut ViewState) {
         self.search_state = None;
         self.pending_options_update = false;
+        view_state.clear_highlights();
     }
 
     pub fn set_search(&mut self, search: Arc<SearchHighlightSpec>) {
@@ -229,8 +230,8 @@ impl RenderLoopState {
             InputAction::CancelSearch => {
                 view_state.status_line.clear_search_prompt();
                 view_state.status_line.message = None;
-                self.clear_search();
                 pending_search_state.take();
+                *latest_search_request = None;
                 self.request_viewport(
                     ViewportRequest::Absolute(view_state.viewport_top_byte),
                     view_state,
@@ -246,8 +247,9 @@ impl RenderLoopState {
                 if trimmed.is_empty() {
                     view_state.status_line.clear_search_prompt();
                     view_state.status_line.message = None;
-                    self.clear_search();
                     pending_search_state.take();
+                    let _ = search_tx.send(SearchCommand::ClearSearchContext).await;
+                    self.clear_search(view_state);
                     self.request_viewport(
                         ViewportRequest::Absolute(view_state.viewport_top_byte),
                         view_state,
@@ -513,15 +515,20 @@ impl RenderLoopState {
                 *latest_search_request = None;
 
                 if let Some(msg) = message {
+                    // Worker signals errors/not-found via `message`; treat this as a failed search
+                    // completion and drop any provisional highlight.
                     view_state.status_line.clear_search_prompt();
                     view_state.status_line.set_message(msg);
                     if let Some((pending_id, _)) = pending_search_state {
                         if *pending_id == request_id {
                             pending_search_state.take();
-                            self.clear_search();
+                            let _ = search_tx.send(SearchCommand::ClearSearchContext).await;
+                            *latest_search_request = None;
+                            self.clear_search(view_state);
                         }
                     }
                 } else if let Some(byte) = match_byte {
+                    // Successful search: promote the pending highlight and jump to the match.
                     view_state.status_line.clear_search_prompt();
                     view_state.status_line.message = None;
                     if let Some((pending_id, state)) = pending_search_state.take() {

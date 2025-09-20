@@ -73,6 +73,12 @@ impl ViewState {
         self.visible_lines.len()
     }
 
+    pub fn clear_highlights(&mut self) {
+        for spans in &mut self.search_highlights {
+            spans.clear();
+        }
+    }
+
     /// Navigate to a specific byte position in the file
     pub fn navigate_to_byte(&mut self, byte_position: u64) {
         self.viewport_top_byte = byte_position;

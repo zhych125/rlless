@@ -93,6 +93,11 @@ impl WorkerState {
                 self.context = Some(new_context);
                 HandlerOutcome::continue_without_response()
             }
+            SearchCommand::ClearSearchContext => {
+                self.context = None;
+                self.last_highlight = None;
+                HandlerOutcome::continue_without_response()
+            }
             SearchCommand::Shutdown => HandlerOutcome::exit(),
         }
     }

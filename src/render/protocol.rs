@@ -65,6 +65,7 @@ pub enum SearchCommand {
         current_top: u64,
     },
     UpdateSearchContext(SearchContext),
+    ClearSearchContext,
     Shutdown,
 }
 
