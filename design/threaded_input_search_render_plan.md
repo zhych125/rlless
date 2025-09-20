@@ -48,7 +48,7 @@ This architecture is simple but constrains responsiveness: every scroll/search b
 ### Thread / Task Responsibilities
 - **Input thread**
   - Runs blocking crossterm polling (needs a dedicated OS thread via `std::thread::spawn` or `tokio::task::spawn_blocking`).
-- Owns `InputStateMachine` to translate raw events into logical `InputAction`s (`src/input/state.rs`).
+- Owns `InputStateMachine` to translate raw events into logical `InputAction`s (`src/input/service.rs`).
   - Coalesces scroll-heavy actions before pushing them to the queue shared with the render coordinator.
   - Pushes resize/search text updates immediately (no coalescing) so the renderer can react within the next tick.
 
@@ -122,14 +122,14 @@ pub enum SearchResponse {
 ## Scroll Coalescing Strategy
 - Replace the current per-event throttling in `TerminalUI::handle_input` (`src/ui/terminal.rs:144`–`185`). Extract the mouse scroll helper into a standalone `InputCoalescer` owned by the input thread.
 - Algorithm:
-  1. When a scroll `InputAction::ScrollUp(k)`/`ScrollDown(k)` arrives, start or extend an accumulation window.
+  1. When a scroll `InputAction::Scroll { direction, lines }` arrives, start or extend an accumulation window keyed by `direction`.
   2. Keep a running total for each direction while events arrive within a short horizon (e.g., 8–12 ms).
   3. Flush the accumulated scroll when:
      - The direction changes.
      - A non-scroll action is received.
      - The accumulation window expires (use `Instant::now()` comparisons in the input thread).
-  4. Emit combined actions using the same enum (e.g., `ScrollDown(total_lines)`), preserving semantics for the coordinator.
-- Mouse wheel and repeated key presses both feed the same coalescer. Search-related inputs bypass coalescing entirely to avoid stale prompts.
+  4. Emit combined actions using the same enum (e.g., `InputAction::Scroll { direction, lines: total_lines }`), preserving semantics for the coordinator.
+- Mouse wheel events are coalesced in the raw collector; keyboard repeats remain unbatched so search prompts stay responsive.
 
 ## Render Loop @ 60 Hz
 Pseudo-flow for the coordinator task:

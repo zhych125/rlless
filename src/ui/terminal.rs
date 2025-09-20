@@ -5,7 +5,8 @@
 //! and SearchEngine components rather than managing data itself.
 
 use crate::error::Result;
-use crate::ui::{ColorTheme, InputAction, UIRenderer, ViewState};
+use crate::input::InputAction;
+use crate::ui::{ColorTheme, UIRenderer, ViewState};
 use ratatui::crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,

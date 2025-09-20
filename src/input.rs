@@ -5,9 +5,9 @@
 
 pub mod raw;
 pub mod service;
-pub mod state;
 
 // Public re-exports for convenience. Modules outside this crate should prefer importing
 // from `crate::input` rather than reaching into submodules.
-pub use service::InputService;
-pub use state::{InputAction, InputState, InputStateMachine, SearchDirection};
+pub use service::{
+    InputAction, InputService, InputState, InputStateMachine, ScrollDirection, SearchDirection,
+};

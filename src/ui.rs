@@ -9,7 +9,9 @@ pub mod terminal;
 pub mod theme;
 
 // Re-export public API
-pub use crate::input::{InputAction, InputService, InputState, InputStateMachine, SearchDirection};
+pub use crate::input::{
+    InputAction, InputService, InputState, InputStateMachine, ScrollDirection, SearchDirection,
+};
 pub use ratatui::style::{Color, Style};
 pub use renderer::UIRenderer;
 pub use state::{DisplayMode, StatusLine, ViewState};

@@ -13,8 +13,9 @@ use crate::app::messages::{
 use crate::app::runtime::{search_worker_loop, spawn_input_thread};
 use crate::error::{Result, RllessError};
 use crate::file_handler::{FileAccessor, FileAccessorFactory};
+use crate::input::{InputAction, ScrollDirection};
 use crate::search::{RipgrepEngine, SearchOptions};
-use crate::ui::{InputAction, UIRenderer, ViewState};
+use crate::ui::{UIRenderer, ViewState};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -181,27 +182,16 @@ impl Application {
     ) -> Result<bool> {
         match action {
             InputAction::Quit => Ok(false),
-            InputAction::ScrollUp(lines) => {
+            InputAction::Scroll { direction, lines } => {
                 view_state.at_eof = false;
+                let delta = match direction {
+                    ScrollDirection::Up => -(lines as i64),
+                    ScrollDirection::Down => lines as i64,
+                };
                 self.request_viewport(
                     ViewportRequest::RelativeLines {
                         anchor: view_state.viewport_top_byte,
-                        lines: -(lines as i64),
-                    },
-                    view_state,
-                    search_tx,
-                    next_request_id,
-                    latest_view_request,
-                )
-                .await?;
-                Ok(true)
-            }
-            InputAction::ScrollDown(lines) => {
-                view_state.at_eof = false;
-                self.request_viewport(
-                    ViewportRequest::RelativeLines {
-                        anchor: view_state.viewport_top_byte,
-                        lines: lines as i64,
+                        lines: delta,
                     },
                     view_state,
                     search_tx,

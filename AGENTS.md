@@ -7,7 +7,7 @@
 
 ## Project Structure & Responsibilities
 - `src/app.rs`: application bootstrap that wires the input service, render service, and search worker.
-- `src/input/`: raw crossterm polling (`raw.rs`), input state machine (`state.rs`), and the orchestrating input service (`service.rs`).
+- `src/input/`: raw crossterm polling with scroll coalescing (`raw.rs`) and the orchestrating input service with the `less`-style state machine (`service.rs`).
 - `src/render/`: render loop (`service.rs`), renderer implementation (`ui.rs`), and cross-thread protocol definitions (`protocol.rs`).
 - `src/search/`: search worker (`worker.rs`), search engine integrations (`engine.rs`), and navigation helpers (`context.rs`).
 - `src/file_handler/`: memory-mapped file accessors and compression adapters.

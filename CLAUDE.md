@@ -389,7 +389,7 @@ Phase 1 established the core file handling infrastructure including:
 - ✅ `Application` struct coordinating all components
 - ✅ `ViewState` with viewport and status management
 - ✅ Event loop with proper EOF handling
-- ✅ Navigation actions (PageUp/Down, ScrollUp/Down, GoToStart/End)
+- ✅ Navigation actions (PageUp/Down, directional Scroll, GoToStart/End)
 - ✅ Search integration with match navigation
 - ✅ Proper "EOD" display when reaching end of content
 

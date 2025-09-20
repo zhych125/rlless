@@ -51,7 +51,7 @@ pub trait UIRenderer {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::ui::InputAction;
+    use crate::ui::{InputAction, ScrollDirection};
     use std::collections::VecDeque;
 
     /// Mock UI renderer for testing
@@ -138,9 +138,18 @@ pub mod tests {
         assert_eq!(renderer.render_count, 1);
 
         // Test input simulation
-        renderer.add_input(InputAction::ScrollDown(1));
+        renderer.add_input(InputAction::Scroll {
+            direction: ScrollDirection::Down,
+            lines: 1,
+        });
         let cmd = renderer.handle_input(None).unwrap();
-        assert_eq!(cmd, Some(InputAction::ScrollDown(1)));
+        assert_eq!(
+            cmd,
+            Some(InputAction::Scroll {
+                direction: ScrollDirection::Down,
+                lines: 1,
+            })
+        );
 
         // Test terminal size
         let size = renderer.get_terminal_size().unwrap();

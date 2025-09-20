@@ -4,8 +4,8 @@ use crate::app::messages::{
 };
 use crate::error::Result;
 use crate::file_handler::FileAccessor;
+use crate::input::{InputAction, InputService, SearchDirection};
 use crate::search::{RipgrepEngine, SearchEngine, SearchOptions};
-use crate::ui::{InputAction, InputService, SearchDirection};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

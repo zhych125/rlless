@@ -8,9 +8,8 @@
 
 ## Target Module Layout
 - `src/input/`
-  - `raw.rs` — wraps crossterm polling, scroll coalescing, and yields low-level input events.
-  - `state.rs` — contains the existing `InputStateMachine` and navigation/search mode transitions.
-  - `service.rs` — orchestrates `raw` + `state`; exposes `poll_action` for the input thread.
+  - `raw.rs` — wraps crossterm polling and yields low-level input events.
+  - `service.rs` — houses the input state machine and exposes `poll_action` for the input thread.
   - `mod.rs` removed; parent `src/input.rs` re-exports selected items.
 - `src/render/`
   - `service.rs` — main render loop owning `ViewState`, draining `InputAction`s, coordinating protocol messages, and invoking the renderer.
@@ -37,7 +36,7 @@
    - Introduce empty scaffolding files (`input.rs`, `render.rs`, etc.) with `todo!()`/`unimplemented!()` placeholders disabled (commented) until logic migrates.
 
 2. **Input Layer Extraction**
-   - Move `InputService`, coalescer, and `InputStateMachine` into the new `input/` files.
+   - Move `InputService`, `InputStateMachine`, and hardware scroll coalescing into the new `input/` module (with coalescing anchored in `raw.rs`).
    - Update the input thread (`spawn_input_thread`) and renderer to use the new paths and a single shared service handle.
    - Revise tests to avoid wall-clock sleeps (inject timeout/clock).
 
