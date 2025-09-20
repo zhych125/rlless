@@ -4,16 +4,16 @@
 //! delegates input handling and heavy data operations to background tasks while
 //! keeping rendering single-threaded.
 
-pub mod messages;
 mod runtime;
 
-use crate::app::messages::{RequestId, SearchCommand, SearchResponse, ViewportRequest};
-use crate::app::runtime::{search_worker_loop, spawn_input_thread};
+use crate::app::runtime::spawn_input_thread;
 use crate::error::{Result, RllessError};
 use crate::file_handler::{FileAccessor, FileAccessorFactory};
 use crate::input::InputAction;
 use crate::render::protocol::SearchHighlightSpec;
+use crate::render::protocol::{RequestId, SearchCommand, SearchResponse, ViewportRequest};
 use crate::render::service::{RenderCoordinator, RenderLoopState};
+use crate::search::worker::search_worker_loop;
 use crate::search::RipgrepEngine;
 use crate::ui::{UIRenderer, ViewState};
 use std::path::Path;
