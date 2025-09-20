@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""
-Generate a large, readable text file for testing rlless.
-Creates a file with realistic log-like content including:
-- Timestamps
-- Log levels (INFO, WARN, ERROR, DEBUG)
-- Various message types
-- Some patterns to search for
+"""Utility to generate large log files (plain text or gzip compressed).
+
+The script produces realistic log-like content with timestamps, log levels,
+and search-friendly patterns.  It now supports command-line arguments so you
+can control the output size and whether the file is compressed.  This makes it
+handy for generating multi-gigabyte fixtures (e.g. a 20 GB `.gz` archive) for
+performance testing.
 """
 
-import random
+from __future__ import annotations
+
+import argparse
 import datetime
-import sys
+import gzip
+import os
+import random
+from typing import Optional
 
 def generate_log_line(line_num):
     """Generate a realistic log line."""
@@ -111,42 +116,138 @@ def generate_log_line(line_num):
     # Construct the full log line
     return f"{timestamp} {thread_id} [{level:5s}] {module:10s} - {message}"
 
-def main():
-    output_file = "large_test_file.log"
-    target_size_mb = 1024  # Generate 25MB to ensure > 20MB
+def parse_size_bytes(size_str: str) -> int:
+    """Parse a human-friendly size string (e.g. '20G', '512M')."""
 
-    print(f"Generating {target_size_mb}MB test file: {output_file}")
-    print("This may take a few moments...")
+    size_str = size_str.strip().lower()
+    if not size_str:
+        raise ValueError("Size string cannot be empty")
+
+    multipliers = {
+        'k': 1024,
+        'm': 1024 ** 2,
+        'g': 1024 ** 3,
+        't': 1024 ** 4,
+    }
+
+    suffix = size_str[-1]
+    if suffix.isdigit():
+        return int(float(size_str))
+
+    if suffix not in multipliers:
+        raise ValueError(f"Unrecognised size suffix '{suffix}' in '{size_str}'")
+
+    value = float(size_str[:-1])
+    if value <= 0:
+        raise ValueError("Size must be positive")
+
+    return int(value * multipliers[suffix])
+
+
+def write_logs(
+    output_path: str,
+    target_bytes: int,
+    compressed: bool,
+    compresslevel: int,
+) -> tuple[int, int, int]:
+    """Generate logs until the uncompressed byte budget is reached.
+
+    Returns a tuple of (lines_written, uncompressed_bytes, compressed_bytes).
+    """
 
     line_count = 0
-    current_size = 0
-    target_size = target_size_mb * 1024 * 1024  # Convert to bytes
+    uncompressed_bytes = 0
 
-    with open(output_file, 'w') as f:
-        while current_size < target_size:
+    if compressed:
+        f = gzip.open(output_path, 'wt', compresslevel=compresslevel)
+    else:
+        f = open(output_path, 'w')
+
+    try:
+        while uncompressed_bytes < target_bytes:
             line = generate_log_line(line_count) + '\n'
             f.write(line)
-            current_size += len(line.encode('utf-8'))
+            encoded_length = len(line.encode('utf-8'))
+            uncompressed_bytes += encoded_length
             line_count += 1
 
-            # Progress indicator
-            if line_count % 10000 == 0:
-                progress = (current_size / target_size) * 100
-                print(f"  Progress: {progress:.1f}% ({current_size / 1024 / 1024:.1f}MB) - {line_count} lines", end='\r')
+            if line_count % 100000 == 0:
+                progress = (uncompressed_bytes / target_bytes) * 100
+                print(
+                    f"  Progress: {progress:6.2f}% "
+                    f"({uncompressed_bytes / 1024 / 1024:.1f} MiB uncompressed)"
+                    f" - {line_count:,} lines",
+                    end='\r',
+                )
+    finally:
+        f.close()
 
-    # Final stats
-    actual_size_mb = current_size / 1024 / 1024
-    print(f"\nGenerated {output_file}:")
-    print(f"  Size: {actual_size_mb:.2f}MB")
-    print(f"  Lines: {line_count:,}")
-    print(f"\nYou can now test with: ./target/debug/rlless {output_file}")
-    print("\nSome interesting patterns to search for:")
+    compressed_bytes = os.path.getsize(output_path)
+    return line_count, uncompressed_bytes, compressed_bytes
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        default="large_test_file.log",
+        help="Path to the output file (defaults to %(default)s)",
+    )
+    parser.add_argument(
+        "--size",
+        default="1G",
+        help=(
+            "Uncompressed data to write (e.g. '20G', '512M'). "
+            "This controls how much log content is generated; gzipped files may end up smaller."
+        ),
+    )
+    parser.add_argument(
+        "--gzip",
+        action="store_true",
+        help="Write gzip-compressed output (suffix '.gz' is not added automatically)",
+    )
+    parser.add_argument(
+        "--compress-level",
+        type=int,
+        default=6,
+        help="Gzip compression level (1=fast, 9=best). Ignored for plain output.",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+
+    try:
+        target_bytes = parse_size_bytes(args.size)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    mode = "gzip" if args.gzip else "plain"
+    print(f"Generating {args.size.upper()} of log data -> {args.output} ({mode})")
+
+    lines, uncompressed, compressed = write_logs(
+        output_path=args.output,
+        target_bytes=target_bytes,
+        compressed=args.gzip,
+        compresslevel=args.compress_level,
+    )
+
+    print("\nGeneration complete:")
+    print(f"  Lines written        : {lines:,}")
+    print(f"  Uncompressed payload : {uncompressed / 1024 / 1024:.2f} MiB")
+    if args.gzip:
+        print(f"  Compressed size      : {compressed / 1024 / 1024:.2f} MiB")
+
+    print("\nUseful search patterns:")
     print("  /ERROR       - Find error messages")
     print("  /CRITICAL    - Find critical errors")
     print("  /MILESTONE   - Find milestone markers (every 100 lines)")
     print("  /CHECKPOINT  - Find checkpoints (every 500 lines)")
     print("  /IMPORTANT   - Find important messages")
     print("  /Thread-01   - Find messages from thread 1")
+
 
 if __name__ == "__main__":
     main()
