@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Number of lines represented by a single mouse wheel tick.
-const MOUSE_SCROLL_LINES: u64 = 3;
+const MOUSE_SCROLL_LINES: u64 = 1;
 /// Poll timeout used when the caller does not provide one. Matched to the render cadence (~60 Hz).
 const DEFAULT_POLL_TIMEOUT_MS: u64 = 16;
 /// Default coalescing window in milliseconds for scroll bursts.
