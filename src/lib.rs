@@ -25,6 +25,10 @@
 pub mod error;
 pub mod file_handler;
 
+// Subsystems introduced by the refactor roadmap
+pub mod input;
+pub mod render;
+
 // Core components
 pub mod app;
 pub mod search;

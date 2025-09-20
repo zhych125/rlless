@@ -1,29 +1,39 @@
 //! Application orchestration layer
 //!
-//! This module provides minimal coordination between file handling, search, and UI components.
-//! It avoids duplicating state management that already exists in individual components.
+//! Coordinates file access, search, and UI rendering. The new architecture
+//! delegates input handling and heavy data operations to background tasks while
+//! keeping rendering single-threaded.
 
-use crate::error::Result;
+pub mod messages;
+mod runtime;
+
+use crate::app::messages::{
+    MatchTraversal, RequestId, SearchCommand, SearchHighlightSpec, SearchResponse, ViewportRequest,
+};
+use crate::app::runtime::{search_worker_loop, spawn_input_thread};
+use crate::error::{Result, RllessError};
 use crate::file_handler::{FileAccessor, FileAccessorFactory};
-use crate::search::{RipgrepEngine, SearchEngine, SearchOptions};
-use crate::ui::{InputAction, SearchDirection, UIRenderer, ViewState};
+use crate::search::{RipgrepEngine, SearchOptions};
+use crate::ui::{InputAction, UIRenderer, ViewState};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::time;
 
 /// Application orchestrator - coordinates components without duplicating their state
 pub struct Application {
     file_accessor: Arc<dyn FileAccessor>,
-    search_engine: RipgrepEngine,
     ui_renderer: Box<dyn UIRenderer>,
     /// Current search results and navigation state
     search_state: Option<SearchState>,
 }
 
 /// Minimal search state for less-like navigation
+#[derive(Clone)]
 struct SearchState {
     pattern: String,
-    direction: SearchDirection,
     options: SearchOptions,
 }
 
@@ -32,446 +42,447 @@ impl Application {
     pub async fn new(file_path: &Path, ui_renderer: Box<dyn UIRenderer>) -> Result<Self> {
         let file_accessor: Arc<dyn FileAccessor> =
             Arc::new(FileAccessorFactory::create(file_path).await?);
-        let search_engine = RipgrepEngine::new(Arc::clone(&file_accessor));
-
         Ok(Self {
             file_accessor,
-            search_engine,
             ui_renderer,
             search_state: None,
         })
     }
 
-    /// Run the application - simple event loop that delegates to components
+    /// Run the application using the multi-threaded input/search architecture
     pub async fn run(&mut self) -> Result<()> {
-        // Initialize UI
         self.ui_renderer.initialize()?;
 
-        // Create view state owned by this loop
         let (width, height) = self.ui_renderer.get_terminal_size()?;
         let file_path = self.file_accessor.file_path().to_path_buf();
         let mut view_state = ViewState::new(file_path, width, height);
 
-        // Load initial content
-        self.update_view_content(&mut view_state, false).await?;
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputAction>();
+        let (mut search_tx, search_rx) = mpsc::channel::<SearchCommand>(64);
+        let (search_resp_tx, mut search_resp_rx) = mpsc::channel::<SearchResponse>(64);
 
-        // Simple event loop - each iteration is independent
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let input_thread =
+            spawn_input_thread(input_tx, shutdown_flag.clone(), Duration::from_millis(12));
+
+        let worker_accessor = Arc::clone(&self.file_accessor);
+        let worker_engine = RipgrepEngine::new(Arc::clone(&self.file_accessor));
+        let search_handle = tokio::spawn(search_worker_loop(
+            search_rx,
+            search_resp_tx,
+            worker_accessor,
+            worker_engine,
+        ));
+
+        let mut next_request_id: RequestId = 1;
+        #[allow(unused_assignments)]
+        let mut latest_view_request: Option<RequestId> = None;
+        let mut latest_search_request: Option<RequestId> = None;
+        let mut pending_search_state: Option<(RequestId, SearchState)> = None;
+
+        // Prime the viewport with initial content
+        let initial_req = next_request_id;
+        next_request_id += 1;
+        latest_view_request = Some(initial_req);
+        search_tx
+            .send(SearchCommand::LoadViewport {
+                request_id: initial_req,
+                top: ViewportRequest::Absolute(0),
+                page_lines: view_state.lines_per_page() as usize,
+                highlights: self.highlight_spec(),
+            })
+            .await
+            .map_err(|_| RllessError::other("search worker unavailable"))?;
+
+        if let Some(response) = search_resp_rx.recv().await {
+            self.handle_response(
+                response,
+                &mut view_state,
+                &mut latest_view_request,
+                &mut latest_search_request,
+                &mut pending_search_state,
+                &mut search_tx,
+                &mut next_request_id,
+            )
+            .await?;
+        }
+
+        let mut interval = time::interval(Duration::from_millis(16));
+        let mut action_buffer = Vec::new();
         let mut running = true;
-        while running {
-            // Handle input in separate scope to avoid borrowing conflicts
-            let action = {
-                match self
-                    .ui_renderer
-                    .handle_input(Some(Duration::from_millis(50)))
-                {
-                    Ok(action_opt) => action_opt,
-                    Err(e) => {
-                        eprintln!("Input error: {}", e);
-                        break;
-                    }
-                }
-            };
 
-            // Execute action if we have one
-            if let Some(action) = action {
-                running = self.execute_action(action, &mut view_state).await?;
+        while running {
+            interval.tick().await;
+
+            while let Ok(action) = input_rx.try_recv() {
+                action_buffer.push(action);
             }
 
-            // Render after handling input
-            self.ui_renderer.render(&view_state)?;
+            for action in action_buffer.drain(..) {
+                if !self
+                    .process_action(
+                        action,
+                        &mut view_state,
+                        &mut search_tx,
+                        &mut next_request_id,
+                        &mut latest_view_request,
+                        &mut latest_search_request,
+                        &mut pending_search_state,
+                    )
+                    .await?
+                {
+                    running = false;
+                    break;
+                }
+            }
 
-            // Brief pause
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            while let Ok(response) = search_resp_rx.try_recv() {
+                self.handle_response(
+                    response,
+                    &mut view_state,
+                    &mut latest_view_request,
+                    &mut latest_search_request,
+                    &mut pending_search_state,
+                    &mut search_tx,
+                    &mut next_request_id,
+                )
+                .await?;
+            }
+
+            self.ui_renderer.render(&view_state)?;
         }
+
+        // Graceful shutdown
+        shutdown_flag.store(true, Ordering::SeqCst);
+        let _ = search_tx.send(SearchCommand::Shutdown).await;
+        search_handle.await.ok();
+        let _ = input_thread.join();
 
         self.ui_renderer.cleanup()?;
         Ok(())
     }
 
-    /// Execute an action - returns false if should quit
-    async fn execute_action(
+    fn highlight_spec(&self) -> Option<SearchHighlightSpec> {
+        self.search_state.as_ref().map(|state| SearchHighlightSpec {
+            pattern: state.pattern.clone(),
+            options: state.options.clone(),
+        })
+    }
+
+    async fn process_action(
         &mut self,
         action: InputAction,
         view_state: &mut ViewState,
+        search_tx: &mut mpsc::Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+        latest_view_request: &mut Option<RequestId>,
+        latest_search_request: &mut Option<RequestId>,
+        pending_search_state: &mut Option<(RequestId, SearchState)>,
     ) -> Result<bool> {
-        use crate::search::SearchOptions;
-
         match action {
             InputAction::Quit => Ok(false),
-
-            // Navigation actions - immediate viewport scrolling (less-like behavior)
-            InputAction::ScrollUp(n) => {
-                let new_byte = self
-                    .file_accessor
-                    .prev_page_start(view_state.viewport_top_byte, n as usize)
-                    .await?;
-                view_state.at_eof = false; // Clear EOF flag (moving backward)
-                view_state.navigate_to_byte(new_byte);
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+            InputAction::ScrollUp(lines) => {
+                view_state.at_eof = false;
+                self.request_viewport(
+                    ViewportRequest::RelativeLines {
+                        anchor: view_state.viewport_top_byte,
+                        lines: -(lines as i64),
+                    },
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
-            InputAction::ScrollDown(n) => {
-                // User is trying to scroll - check if last line of file is already visible
-                let file_size = self.file_accessor.file_size();
-
-                if !view_state.visible_lines.is_empty() {
-                    // Calculate byte position after our current viewport (end of what we can see)
-                    let end_of_viewport = self
-                        .file_accessor
-                        .next_page_start(
-                            view_state.viewport_top_byte,
-                            view_state.visible_lines.len(),
-                        )
-                        .await?;
-
-                    // If current viewport already shows the end of file, show EOD and stop scrolling
-                    if end_of_viewport >= file_size {
-                        view_state.at_eof = true;
-                        return Ok(true);
-                    }
-                }
-
-                // Normal scroll - try to advance
-                let new_byte = self
-                    .file_accessor
-                    .next_page_start(view_state.viewport_top_byte, n as usize)
-                    .await?;
-
-                // Move viewport and clear EOF flag for normal scrolling
+            InputAction::ScrollDown(lines) => {
                 view_state.at_eof = false;
-                view_state.navigate_to_byte(new_byte);
-
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                self.request_viewport(
+                    ViewportRequest::RelativeLines {
+                        anchor: view_state.viewport_top_byte,
+                        lines: lines as i64,
+                    },
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
             InputAction::PageUp => {
-                let page_size = view_state.lines_per_page() as usize;
-                let new_byte = self
-                    .file_accessor
-                    .prev_page_start(view_state.viewport_top_byte, page_size)
-                    .await?;
-                view_state.at_eof = false; // Clear EOF flag (moving backward)
-                view_state.navigate_to_byte(new_byte);
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                view_state.at_eof = false;
+                self.request_viewport(
+                    ViewportRequest::RelativeLines {
+                        anchor: view_state.viewport_top_byte,
+                        lines: -(view_state.lines_per_page() as i64),
+                    },
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
             InputAction::PageDown => {
-                let page_size = view_state.lines_per_page() as usize;
-                let new_byte = self
-                    .file_accessor
-                    .next_page_start(view_state.viewport_top_byte, page_size)
-                    .await?;
-
-                // Check if we hit EOF (next_page_start returns file_size when can't advance)
-                let file_size = self.file_accessor.file_size();
-                if new_byte == file_size {
-                    view_state.at_eof = true;
-                } else {
-                    view_state.at_eof = false;
-                    view_state.navigate_to_byte(new_byte);
-                }
-
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                view_state.at_eof = false;
+                self.request_viewport(
+                    ViewportRequest::RelativeLines {
+                        anchor: view_state.viewport_top_byte,
+                        lines: view_state.lines_per_page() as i64,
+                    },
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
             InputAction::GoToStart => {
-                view_state.at_eof = false; // Clear EOF flag
-                view_state.navigate_to_byte(0);
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                view_state.at_eof = false;
+                self.request_viewport(
+                    ViewportRequest::Absolute(0),
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
             InputAction::GoToEnd => {
-                let page_size = view_state.lines_per_page() as usize;
-                let end_byte = self.file_accessor.last_page_start(page_size).await?;
-                view_state.at_eof = false; // Clear EOF flag (GoToEnd navigates to a valid position)
-                view_state.navigate_to_byte(end_byte);
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                view_state.at_eof = false;
+                self.request_viewport(
+                    ViewportRequest::EndOfFile,
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
-
-            // Search actions
             InputAction::StartSearch(direction) => {
-                // Set search prompt in status line to show user is in search mode
                 view_state.status_line.set_search_prompt(direction);
                 Ok(true)
             }
             InputAction::UpdateSearchBuffer { direction, buffer } => {
-                // Update search prompt with current buffer as user types
                 view_state
                     .status_line
                     .update_search_prompt(direction, buffer);
                 Ok(true)
             }
             InputAction::CancelSearch => {
-                // Clear search prompt and return to normal display
                 view_state.status_line.clear_search_prompt();
-                view_state.status_line.message = None; // Clear any search messages
+                view_state.status_line.message = None;
+                self.search_state = None;
+                pending_search_state.take();
+                self.request_viewport(
+                    ViewportRequest::Absolute(view_state.viewport_top_byte),
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await?;
                 Ok(true)
             }
             InputAction::ExecuteSearch { pattern, direction } => {
-                // Less-like search: use literal string matching by default (like real less)
-                let options = SearchOptions::default();
-                let current_byte = view_state.viewport_top_byte;
-
-                // Search from current viewport position (less-like behavior)
-                let search_result = match direction {
-                    SearchDirection::Forward => {
-                        self.search_engine
-                            .search_from(&pattern, current_byte, &options)
-                            .await
-                    }
-                    SearchDirection::Backward => {
-                        self.search_engine
-                            .search_prev(&pattern, current_byte, &options)
-                            .await
-                    }
-                };
-
-                match search_result {
-                    Ok(Some(match_byte)) => {
-                        // Store search state
-                        self.search_state = Some(SearchState {
-                            pattern: pattern.clone(),
-                            direction,
-                            options,
-                        });
-
-                        // Put the match at the top of viewport (less-like behavior)
-                        view_state.navigate_to_byte(match_byte);
-
-                        // Clear search prompt and messages - search completed successfully
-                        view_state.status_line.clear_search_prompt();
-                        view_state.status_line.message = None;
-                    }
-                    Ok(None) => {
-                        self.search_state = None;
-
-                        // Clear search prompt and show error message
-                        view_state.status_line.clear_search_prompt();
-                        view_state.status_line.message = Some("Pattern not found".to_string());
-                    }
-                    Err(e) => {
-                        self.search_state = None;
-
-                        // Clear search prompt and show error message
-                        view_state.status_line.clear_search_prompt();
-                        view_state.status_line.message = Some(format!("Search failed: {}", e));
-                    }
+                let trimmed = pattern.trim();
+                if trimmed.is_empty() {
+                    view_state.status_line.clear_search_prompt();
+                    view_state.status_line.message = None;
+                    return Ok(true);
                 }
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+
+                let options = SearchOptions::default();
+                let request_id = *next_request_id;
+                *next_request_id += 1;
+                *latest_search_request = Some(request_id);
+                pending_search_state.replace((
+                    request_id,
+                    SearchState {
+                        pattern: trimmed.to_string(),
+                        options: options.clone(),
+                    },
+                ));
+
+                search_tx
+                    .send(SearchCommand::ExecuteSearch {
+                        request_id,
+                        pattern: trimmed.to_string(),
+                        direction,
+                        options,
+                        origin_byte: view_state.viewport_top_byte,
+                    })
+                    .await
+                    .map_err(|_| RllessError::other("search worker unavailable"))?;
                 Ok(true)
             }
             InputAction::NextMatch => {
-                if let Some(ref search) = self.search_state {
-                    // NextMatch continues in the same direction as original search
-                    let next_start_byte = match search.direction {
-                        SearchDirection::Forward => {
-                            // For forward search, start from next line after current viewport
-                            self.find_next_line_start(view_state.viewport_top_byte)
-                                .await?
-                        }
-                        SearchDirection::Backward => {
-                            // For backward search, start from previous line before current viewport
-                            self.find_prev_line_start(view_state.viewport_top_byte)
-                                .await?
-                        }
-                    };
-
-                    let search_result = match search.direction {
-                        SearchDirection::Forward => {
-                            self.search_engine
-                                .search_from(&search.pattern, next_start_byte, &search.options)
-                                .await
-                        }
-                        SearchDirection::Backward => {
-                            self.search_engine
-                                .search_prev(&search.pattern, next_start_byte, &search.options)
-                                .await
-                        }
-                    };
-
-                    match search_result {
-                        Ok(Some(match_byte)) => {
-                            // Put the match at the top of viewport
-                            view_state.at_eof = false; // Clear EOF flag when search succeeds
-                            view_state.navigate_to_byte(match_byte);
-                        }
-                        Ok(None) => {
-                            view_state
-                                .status_line
-                                .set_message("Pattern not found".to_string());
-                        }
-                        Err(e) => {
-                            view_state
-                                .status_line
-                                .set_message(format!("Search error: {}", e));
-                        }
-                    }
-                } else {
+                if self.search_state.is_none() {
                     view_state
                         .status_line
                         .set_message("No active search".to_string());
+                    return Ok(true);
                 }
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                let request_id = *next_request_id;
+                *next_request_id += 1;
+                *latest_search_request = Some(request_id);
+                search_tx
+                    .send(SearchCommand::NavigateMatch {
+                        request_id,
+                        traversal: MatchTraversal::Next,
+                        current_top: view_state.viewport_top_byte,
+                    })
+                    .await
+                    .map_err(|_| RllessError::other("search worker unavailable"))?;
                 Ok(true)
             }
             InputAction::PreviousMatch => {
-                if let Some(ref search) = self.search_state {
-                    // PreviousMatch goes in opposite direction of original search
-                    let prev_start_byte = match search.direction {
-                        SearchDirection::Forward => {
-                            // For forward search, previous means go backward from current viewport
-                            self.find_prev_line_start(view_state.viewport_top_byte)
-                                .await?
-                        }
-                        SearchDirection::Backward => {
-                            // For backward search, previous means go forward from current viewport
-                            self.find_next_line_start(view_state.viewport_top_byte)
-                                .await?
-                        }
-                    };
-
-                    let search_result = match search.direction {
-                        SearchDirection::Forward => {
-                            // For forward search, previous means search backward
-                            self.search_engine
-                                .search_prev(&search.pattern, prev_start_byte, &search.options)
-                                .await
-                        }
-                        SearchDirection::Backward => {
-                            // For backward search, previous means search forward
-                            self.search_engine
-                                .search_from(&search.pattern, prev_start_byte, &search.options)
-                                .await
-                        }
-                    };
-
-                    match search_result {
-                        Ok(Some(match_byte)) => {
-                            // Put the match at the top of viewport
-                            view_state.at_eof = false; // Clear EOF flag when search succeeds
-                            view_state.navigate_to_byte(match_byte);
-                        }
-                        Ok(None) => {
-                            view_state
-                                .status_line
-                                .set_message("Pattern not found".to_string());
-                        }
-                        Err(e) => {
-                            view_state
-                                .status_line
-                                .set_message(format!("Search error: {}", e));
-                        }
-                    }
-                } else {
+                if self.search_state.is_none() {
                     view_state
                         .status_line
                         .set_message("No active search".to_string());
+                    return Ok(true);
                 }
-                self.update_view_content(view_state, self.search_state.is_some())
-                    .await?;
+                let request_id = *next_request_id;
+                *next_request_id += 1;
+                *latest_search_request = Some(request_id);
+                search_tx
+                    .send(SearchCommand::NavigateMatch {
+                        request_id,
+                        traversal: MatchTraversal::Previous,
+                        current_top: view_state.viewport_top_byte,
+                    })
+                    .await
+                    .map_err(|_| RllessError::other("search worker unavailable"))?;
                 Ok(true)
             }
-
-            // Other actions - simplified for essential functionality only
             InputAction::Resize { width, height } => {
-                // Update terminal size and recalculate view if dimensions changed
                 if view_state.update_terminal_size(width, height) {
-                    // Dimensions changed - recalculate content for new viewport size
-                    // This will read new lines from file_accessor and recompute highlights if search is active
-                    self.update_view_content(view_state, self.search_state.is_some())
-                        .await?;
+                    self.request_viewport(
+                        ViewportRequest::Absolute(view_state.viewport_top_byte),
+                        view_state,
+                        search_tx,
+                        next_request_id,
+                        latest_view_request,
+                    )
+                    .await?;
                 }
                 Ok(true)
             }
-            InputAction::NoAction => Ok(true),
-            InputAction::InvalidInput => {
-                // Just ignore invalid input - no error message needed
-                Ok(true)
+            InputAction::NoAction | InputAction::InvalidInput => Ok(true),
+        }
+    }
+
+    async fn handle_response(
+        &mut self,
+        response: SearchResponse,
+        view_state: &mut ViewState,
+        latest_view_request: &mut Option<RequestId>,
+        latest_search_request: &mut Option<RequestId>,
+        pending_search_state: &mut Option<(RequestId, SearchState)>,
+        search_tx: &mut mpsc::Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+    ) -> Result<()> {
+        match response {
+            SearchResponse::ViewportLoaded {
+                request_id,
+                top_byte,
+                lines,
+                highlights,
+                at_eof,
+                file_size,
+            } => {
+                if Some(request_id) != *latest_view_request {
+                    return Ok(());
+                }
+                *latest_view_request = None;
+                view_state.navigate_to_byte(top_byte);
+                view_state.at_eof = at_eof;
+                view_state.update_viewport_content(lines, highlights);
+                view_state.file_size = Some(file_size);
+            }
+            SearchResponse::SearchCompleted {
+                request_id,
+                match_byte,
+                message,
+            } => {
+                if Some(request_id) != *latest_search_request {
+                    return Ok(());
+                }
+                *latest_search_request = None;
+
+                if let Some(msg) = message {
+                    view_state.status_line.clear_search_prompt();
+                    view_state.status_line.set_message(msg);
+                    if let Some((pending_id, _)) = pending_search_state {
+                        if *pending_id == request_id {
+                            pending_search_state.take();
+                            self.search_state = None;
+                        }
+                    }
+                } else if let Some(byte) = match_byte {
+                    view_state.status_line.clear_search_prompt();
+                    view_state.status_line.message = None;
+                    if let Some((pending_id, state)) = pending_search_state.take() {
+                        if pending_id == request_id {
+                            self.search_state = Some(state);
+                        }
+                    }
+                    view_state.at_eof = false;
+                    let request_id = self
+                        .request_viewport(
+                            ViewportRequest::Absolute(byte),
+                            view_state,
+                            search_tx,
+                            next_request_id,
+                            latest_view_request,
+                        )
+                        .await?;
+                    *latest_view_request = Some(request_id);
+                }
+            }
+            SearchResponse::Error { request_id, error } => {
+                if Some(request_id) == *latest_view_request {
+                    *latest_view_request = None;
+                }
+                if Some(request_id) == *latest_search_request {
+                    *latest_search_request = None;
+                    pending_search_state.take();
+                }
+                view_state
+                    .status_line
+                    .set_message(format!("Operation failed: {}", error));
             }
         }
-    }
-
-    /// Find the byte position of the start of the next line after given byte position
-    async fn find_next_line_start(&self, current_byte: u64) -> Result<u64> {
-        // Use FileAccessor's next_page_start with 1 line to find next line
-        let new_byte = self.file_accessor.next_page_start(current_byte, 1).await?;
-
-        // If at EOF (returned file_size), return current position to indicate no advancement
-        if new_byte == self.file_accessor.file_size() {
-            Ok(current_byte)
-        } else {
-            Ok(new_byte)
-        }
-    }
-
-    /// Find the byte position of the start of the previous line before given byte position
-    async fn find_prev_line_start(&self, current_byte: u64) -> Result<u64> {
-        if current_byte == 0 {
-            return Ok(0); // Beginning of file
-        }
-
-        // Use FileAccessor's prev_page_start with 1 line to find previous line
-        self.file_accessor.prev_page_start(current_byte, 1).await
-    }
-
-    /// Update viewport content with optional search highlights
-    async fn update_view_content(
-        &self,
-        view_state: &mut ViewState,
-        with_highlights: bool,
-    ) -> Result<()> {
-        let page_size = view_state.lines_per_page() as usize;
-
-        // ✅ Use FileAccessor byte-based method
-        let lines = self
-            .file_accessor
-            .read_from_byte(view_state.viewport_top_byte, page_size)
-            .await?;
-
-        // Compute viewport-relative highlights
-        let highlights = if with_highlights {
-            self.compute_viewport_highlights(&lines).await?
-        } else {
-            vec![Vec::new(); lines.len()]
-        };
-
-        // Update view state with both lines and highlights
-        view_state.update_viewport_content(lines, highlights);
-
-        // Update file size for position calculation
-        view_state.file_size = Some(self.file_accessor.file_size());
-
         Ok(())
     }
 
-    /// Compute search highlights for viewport-relative line indices
-    async fn compute_viewport_highlights(
+    async fn request_viewport(
         &self,
-        lines: &[String],
-    ) -> Result<Vec<Vec<(usize, usize)>>> {
-        let mut highlights = vec![Vec::new(); lines.len()];
-
-        if let Some(ref search_state) = self.search_state {
-            for (viewport_line_idx, line_content) in lines.iter().enumerate() {
-                let match_ranges = self.search_engine.get_line_matches(
-                    &search_state.pattern,
-                    line_content,
-                    &search_state.options,
-                )?;
-
-                highlights[viewport_line_idx] = match_ranges;
-            }
-        }
-
-        Ok(highlights)
+        top: ViewportRequest,
+        view_state: &ViewState,
+        search_tx: &mut mpsc::Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+        latest_view_request: &mut Option<RequestId>,
+    ) -> Result<RequestId> {
+        let request_id = *next_request_id;
+        *next_request_id += 1;
+        let _ = latest_view_request.replace(request_id);
+        search_tx
+            .send(SearchCommand::LoadViewport {
+                request_id,
+                top,
+                page_lines: view_state.lines_per_page() as usize,
+                highlights: self.highlight_spec(),
+            })
+            .await
+            .map_err(|_| RllessError::other("search worker unavailable"))?;
+        Ok(request_id)
     }
 }

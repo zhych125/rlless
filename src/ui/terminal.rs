@@ -5,9 +5,9 @@
 //! and SearchEngine components rather than managing data itself.
 
 use crate::error::Result;
-use crate::ui::{ColorTheme, InputAction, InputStateMachine, UIRenderer, ViewState};
+use crate::ui::{ColorTheme, InputAction, UIRenderer, ViewState};
 use ratatui::crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEvent, MouseEventKind},
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,7 +20,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -31,9 +31,6 @@ type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 pub struct TerminalUI {
     terminal: Option<CrosstermTerminal>,
     theme: ColorTheme,
-    input_machine: InputStateMachine,
-    last_scroll_time: Option<Instant>,
-    scroll_throttle_duration: Duration,
 }
 
 impl TerminalUI {
@@ -42,9 +39,6 @@ impl TerminalUI {
         Ok(Self {
             terminal: None,
             theme: ColorTheme::default(),
-            input_machine: InputStateMachine::new(),
-            last_scroll_time: None,
-            scroll_throttle_duration: Duration::from_millis(100), // 100ms throttle
         })
     }
 
@@ -53,9 +47,6 @@ impl TerminalUI {
         Ok(Self {
             terminal: None,
             theme,
-            input_machine: InputStateMachine::new(),
-            last_scroll_time: None,
-            scroll_throttle_duration: Duration::from_millis(100), // 100ms throttle
         })
     }
 
@@ -140,49 +131,6 @@ impl TerminalUI {
         let status = Paragraph::new(status_text).style(status_style);
         frame.render_widget(status, area);
     }
-
-    /// Handle mouse events with scroll throttling
-    fn handle_mouse_event(&mut self, mouse_event: MouseEvent) -> Option<InputAction> {
-        match mouse_event.kind {
-            MouseEventKind::ScrollUp => {
-                if self.should_throttle_scroll() {
-                    return None;
-                }
-                self.update_scroll_time();
-                // Mouse scroll up = move up in file (show earlier lines)
-                // 3 lines per event with longer throttle for responsive but controlled scrolling
-                Some(InputAction::ScrollUp(3))
-            }
-            MouseEventKind::ScrollDown => {
-                if self.should_throttle_scroll() {
-                    return None;
-                }
-                self.update_scroll_time();
-                // Mouse scroll down = move down in file (show later lines)
-                // 3 lines per event with longer throttle for responsive but controlled scrolling
-                Some(InputAction::ScrollDown(3))
-            }
-            _ => {
-                // Ignore other mouse events (clicks, moves, etc.)
-                None
-            }
-        }
-    }
-
-    /// Check if scroll event should be throttled
-    fn should_throttle_scroll(&self) -> bool {
-        if let Some(last_time) = self.last_scroll_time {
-            let now = Instant::now();
-            now.duration_since(last_time) < self.scroll_throttle_duration
-        } else {
-            false
-        }
-    }
-
-    /// Update the last scroll time
-    fn update_scroll_time(&mut self) {
-        self.last_scroll_time = Some(Instant::now());
-    }
 }
 
 impl UIRenderer for TerminalUI {
@@ -210,33 +158,10 @@ impl UIRenderer for TerminalUI {
         Ok(())
     }
 
-    fn handle_input(&mut self, timeout: Option<Duration>) -> Result<Option<InputAction>> {
-        let timeout_duration = timeout.unwrap_or(Duration::from_millis(100));
-
-        if event::poll(timeout_duration)? {
-            match event::read()? {
-                Event::Key(key_event) => {
-                    let action = self.input_machine.handle_key_event(key_event);
-                    // Only return non-NoAction results
-                    return Ok(match action {
-                        InputAction::NoAction => None,
-                        other => Some(other),
-                    });
-                }
-                Event::Resize(width, height) => {
-                    return Ok(Some(InputAction::Resize { width, height }));
-                }
-                Event::Mouse(mouse_event) => {
-                    if let Some(action) = self.handle_mouse_event(mouse_event) {
-                        return Ok(Some(action));
-                    }
-                }
-                _ => {
-                    // Ignore other events
-                }
-            }
-        }
-
+    fn handle_input(&mut self, _timeout: Option<Duration>) -> Result<Option<InputAction>> {
+        // The standalone render loop no longer polls input directly; background threads provide
+        // actions via channels. This implementation remains for compatibility with legacy tests
+        // and returns `None` to signal "no input".
         Ok(None)
     }
 
@@ -307,33 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn test_input_state_machine_integration() {
-        use crate::ui::InputState;
-
-        let ui = TerminalUI::new().unwrap();
-
-        // Test that input state machine is properly initialized
-        assert_eq!(ui.input_machine.get_state(), InputState::Navigation);
-        assert_eq!(ui.input_machine.get_search_buffer(), "");
-    }
-
-    #[test]
-    fn test_mouse_scroll_actions() {
-        // Test that mouse scroll events translate to correct scroll actions
-        // Note: This tests the logic, not actual mouse event generation
-        
-        // ScrollUp should translate to ScrollUp(3) action
-        let scroll_up_action = InputAction::ScrollUp(3);
-        match scroll_up_action {
-            InputAction::ScrollUp(lines) => assert_eq!(lines, 3),
-            _ => panic!("Expected ScrollUp action"),
-        }
-        
-        // ScrollDown should translate to ScrollDown(3) action  
-        let scroll_down_action = InputAction::ScrollDown(3);
-        match scroll_down_action {
-            InputAction::ScrollDown(lines) => assert_eq!(lines, 3),
-            _ => panic!("Expected ScrollDown action"),
-        }
+    fn test_handle_input_noop() {
+        let mut ui = TerminalUI::new().unwrap();
+        assert_eq!(ui.handle_input(None).unwrap(), None);
     }
 }
