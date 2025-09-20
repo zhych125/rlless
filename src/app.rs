@@ -13,7 +13,7 @@ use crate::error::{Result, RllessError};
 use crate::file_handler::{FileAccessor, FileAccessorFactory};
 use crate::input::InputAction;
 use crate::render::protocol::SearchHighlightSpec;
-use crate::render::service::RenderLoopState;
+use crate::render::service::{RenderCoordinator, RenderLoopState};
 use crate::search::RipgrepEngine;
 use crate::ui::{UIRenderer, ViewState};
 use std::path::Path;
@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time;
 
 /// Application orchestrator - coordinates components without duplicating their state
 pub struct Application {
@@ -101,52 +100,19 @@ impl Application {
                 .await?;
         }
 
-        let mut interval = time::interval(Duration::from_millis(16));
-        let mut action_buffer = Vec::new();
-        let mut running = true;
-
-        while running {
-            interval.tick().await;
-
-            while let Ok(action) = input_rx.try_recv() {
-                action_buffer.push(action);
-            }
-
-            for action in action_buffer.drain(..) {
-                if !self
-                    .render_state
-                    .process_action(
-                        action,
-                        &mut view_state,
-                        &mut search_tx,
-                        &mut next_request_id,
-                        &mut latest_view_request,
-                        &mut latest_search_request,
-                        &mut pending_search_state,
-                    )
-                    .await?
-                {
-                    running = false;
-                    break;
-                }
-            }
-
-            while let Ok(response) = search_resp_rx.try_recv() {
-                self.render_state
-                    .handle_response(
-                        response,
-                        &mut view_state,
-                        &mut latest_view_request,
-                        &mut latest_search_request,
-                        &mut pending_search_state,
-                        &mut search_tx,
-                        &mut next_request_id,
-                    )
-                    .await?;
-            }
-
-            self.ui_renderer.render(&view_state)?;
-        }
+        RenderCoordinator::run(
+            &mut self.render_state,
+            &mut view_state,
+            self.ui_renderer.as_mut(),
+            &mut input_rx,
+            &mut search_tx,
+            &mut search_resp_rx,
+            &mut next_request_id,
+            &mut latest_view_request,
+            &mut latest_search_request,
+            &mut pending_search_state,
+        )
+        .await?;
 
         // Graceful shutdown
         shutdown_flag.store(true, Ordering::SeqCst);

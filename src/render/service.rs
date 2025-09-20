@@ -11,7 +11,8 @@ use crate::render::protocol::{
 };
 use crate::search::SearchOptions;
 use crate::ui::ViewState;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Sender, UnboundedReceiver};
+use tokio::time::{self, Duration};
 
 /// Tracks render-related state that must persist across input actions and worker responses.
 #[derive(Default)]
@@ -43,7 +44,7 @@ impl RenderLoopState {
         &mut self,
         action: InputAction,
         view_state: &mut ViewState,
-        search_tx: &mut mpsc::Sender<SearchCommand>,
+        search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
@@ -243,7 +244,7 @@ impl RenderLoopState {
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
         pending_search_state: &mut Option<(RequestId, SearchHighlightSpec)>,
-        search_tx: &mut mpsc::Sender<SearchCommand>,
+        search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
     ) -> Result<()> {
         match response {
@@ -324,7 +325,7 @@ impl RenderLoopState {
         &self,
         top: ViewportRequest,
         view_state: &ViewState,
-        search_tx: &mut mpsc::Sender<SearchCommand>,
+        search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
         latest_view_request: &mut Option<RequestId>,
     ) -> Result<RequestId> {
@@ -370,5 +371,71 @@ mod state_tests {
                 lines: 1,
             }
         );
+    }
+}
+
+/// Orchestrates the main render loop once channels have been wired.
+pub struct RenderCoordinator;
+
+impl RenderCoordinator {
+    pub async fn run(
+        state: &mut RenderLoopState,
+        view_state: &mut ViewState,
+        ui_renderer: &mut dyn crate::ui::UIRenderer,
+        input_rx: &mut UnboundedReceiver<InputAction>,
+        search_tx: &mut Sender<SearchCommand>,
+        search_resp_rx: &mut tokio::sync::mpsc::Receiver<SearchResponse>,
+        next_request_id: &mut RequestId,
+        latest_view_request: &mut Option<RequestId>,
+        latest_search_request: &mut Option<RequestId>,
+        pending_search_state: &mut Option<(RequestId, SearchHighlightSpec)>,
+    ) -> Result<()> {
+        let mut interval = time::interval(Duration::from_millis(16));
+        let mut action_buffer = Vec::new();
+        let mut running = true;
+
+        while running {
+            interval.tick().await;
+
+            while let Ok(action) = input_rx.try_recv() {
+                action_buffer.push(action);
+            }
+
+            for action in action_buffer.drain(..) {
+                if !state
+                    .process_action(
+                        action,
+                        view_state,
+                        search_tx,
+                        next_request_id,
+                        latest_view_request,
+                        latest_search_request,
+                        pending_search_state,
+                    )
+                    .await?
+                {
+                    running = false;
+                    break;
+                }
+            }
+
+            while let Ok(response) = search_resp_rx.try_recv() {
+                state
+                    .handle_response(
+                        response,
+                        view_state,
+                        latest_view_request,
+                        latest_search_request,
+                        pending_search_state,
+                        search_tx,
+                        next_request_id,
+                    )
+                    .await?;
+            }
+
+            ui_renderer.render(view_state)?;
+        }
+
+        Ok(())
     }
 }
