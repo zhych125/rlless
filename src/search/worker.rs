@@ -14,301 +14,338 @@ pub async fn search_worker_loop(
     mut rx: Receiver<SearchCommand>,
     tx: Sender<SearchResponse>,
     file_accessor: Arc<dyn FileAccessor>,
-    mut search_engine: RipgrepEngine,
+    search_engine: RipgrepEngine,
 ) {
-    let mut context: Option<SearchContext> = None;
+    let mut state = WorkerState::new(file_accessor, search_engine);
 
     while let Some(cmd) = rx.recv().await {
+        let outcome = state.handle_command(cmd).await;
+        if let Some(response) = outcome.response {
+            if tx.send(response).await.is_err() {
+                break;
+            }
+        }
+
+        if outcome.done {
+            break;
+        }
+    }
+}
+
+struct WorkerState {
+    file_accessor: Arc<dyn FileAccessor>,
+    search_engine: RipgrepEngine,
+    context: Option<SearchContext>,
+}
+
+impl WorkerState {
+    fn new(file_accessor: Arc<dyn FileAccessor>, search_engine: RipgrepEngine) -> Self {
+        Self {
+            file_accessor,
+            search_engine,
+            context: None,
+        }
+    }
+
+    async fn handle_command(&mut self, cmd: SearchCommand) -> HandlerOutcome {
         match cmd {
             SearchCommand::LoadViewport {
                 request_id,
                 top,
                 page_lines,
                 highlights,
-            } => {
-                let response = load_viewport(
-                    request_id,
-                    &*file_accessor,
-                    &search_engine,
-                    top,
-                    page_lines,
-                    highlights,
-                )
-                .await;
-
-                match response {
-                    Ok(resp) => {
-                        if tx.send(resp).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = tx
-                            .send(SearchResponse::Error {
-                                request_id,
-                                error: err,
-                            })
-                            .await;
-                    }
-                }
-            }
+            } => match self
+                .load_viewport(request_id, top, page_lines, highlights)
+                .await
+            {
+                Ok(response) => HandlerOutcome::respond(response),
+                Err(error) => HandlerOutcome::respond(SearchResponse::Error { request_id, error }),
+            },
             SearchCommand::ExecuteSearch {
                 request_id,
                 pattern,
                 direction,
                 options,
                 origin_byte,
-            } => {
-                let result = execute_search(
-                    request_id,
-                    &mut search_engine,
-                    &mut context,
-                    pattern,
-                    direction,
-                    options,
-                    origin_byte,
-                )
-                .await;
-
-                if tx.send(result).await.is_err() {
-                    break;
-                }
-            }
+            } => HandlerOutcome::respond(
+                self.execute_search(request_id, pattern, direction, options, origin_byte)
+                    .await,
+            ),
             SearchCommand::NavigateMatch {
                 request_id,
                 traversal,
                 current_top,
-            } => {
-                let result = navigate_match(
-                    request_id,
-                    &file_accessor,
-                    &mut search_engine,
-                    &mut context,
-                    traversal,
-                    current_top,
-                )
-                .await;
+            } => HandlerOutcome::respond(
+                self.navigate_match(request_id, traversal, current_top)
+                    .await,
+            ),
+            SearchCommand::UpdateSearchContext(new_context) => {
+                self.context = Some(new_context);
+                HandlerOutcome::continue_without_response()
+            }
+            SearchCommand::Shutdown => HandlerOutcome::exit(),
+        }
+    }
 
-                if tx.send(result).await.is_err() {
-                    break;
+    async fn load_viewport(
+        &self,
+        request_id: RequestId,
+        top: ViewportRequest,
+        page_lines: usize,
+        highlights: Option<Arc<SearchHighlightSpec>>,
+    ) -> Result<SearchResponse> {
+        let target_byte = self.resolve_viewport_target(top, page_lines).await?;
+        let lines = self
+            .file_accessor
+            .read_from_byte(target_byte, page_lines)
+            .await?;
+        let highlights = if let Some(spec) = highlights {
+            self.compute_highlights(spec.as_ref(), &lines)?
+        } else {
+            vec![Vec::new(); lines.len()]
+        };
+
+        let file_size = self.file_accessor.file_size();
+        let at_eof = self
+            .detect_eof(target_byte, page_lines, file_size, &lines)
+            .await?;
+
+        Ok(SearchResponse::ViewportLoaded {
+            request_id,
+            top_byte: target_byte,
+            lines,
+            highlights,
+            at_eof,
+            file_size,
+        })
+    }
+
+    async fn execute_search(
+        &mut self,
+        request_id: RequestId,
+        pattern: Arc<str>,
+        direction: SearchDirection,
+        options: SearchOptions,
+        origin_byte: u64,
+    ) -> SearchResponse {
+        let mut new_context = SearchContext {
+            pattern: Arc::clone(&pattern),
+            direction,
+            options: options.clone(),
+            last_match_byte: None,
+        };
+
+        let search_future = match direction {
+            SearchDirection::Forward => {
+                self.search_engine
+                    .search_from(pattern.as_ref(), origin_byte, &options)
+            }
+            SearchDirection::Backward => {
+                self.search_engine
+                    .search_prev(pattern.as_ref(), origin_byte, &options)
+            }
+        };
+
+        match search_future.await {
+            Ok(Some(byte)) => {
+                new_context.last_match_byte = Some(byte);
+                self.context = Some(new_context);
+                SearchResponse::SearchCompleted {
+                    request_id,
+                    match_byte: Some(byte),
+                    message: None,
                 }
             }
-            SearchCommand::UpdateSearchContext(new_context) => {
-                context = Some(new_context);
+            Ok(None) => {
+                self.context = Some(new_context);
+                SearchResponse::SearchCompleted {
+                    request_id,
+                    match_byte: None,
+                    message: Some("Pattern not found".to_string()),
+                }
             }
-            SearchCommand::Shutdown => break,
+            Err(error) => SearchResponse::Error { request_id, error },
         }
     }
-}
 
-async fn load_viewport(
-    request_id: RequestId,
-    file_accessor: &dyn FileAccessor,
-    search_engine: &RipgrepEngine,
-    top: ViewportRequest,
-    page_lines: usize,
-    highlights: Option<SearchHighlightSpec>,
-) -> Result<SearchResponse> {
-    let target_byte = match top {
-        ViewportRequest::Absolute(byte) => byte,
-        ViewportRequest::RelativeLines { anchor, lines } => {
-            if lines == 0 {
-                anchor
-            } else if lines > 0 {
-                file_accessor
-                    .next_page_start(anchor, lines as usize)
-                    .await?
-            } else {
-                file_accessor
-                    .prev_page_start(anchor, (-lines) as usize)
-                    .await?
+    async fn navigate_match(
+        &mut self,
+        request_id: RequestId,
+        traversal: MatchTraversal,
+        current_top: u64,
+    ) -> SearchResponse {
+        let ctx_snapshot = match self.context.as_ref() {
+            Some(ctx) => (ctx.direction, ctx.options.clone(), Arc::clone(&ctx.pattern)),
+            None => {
+                return SearchResponse::SearchCompleted {
+                    request_id,
+                    match_byte: None,
+                    message: Some("No active search".to_string()),
+                };
             }
-        }
-        ViewportRequest::EndOfFile => file_accessor.last_page_start(page_lines).await?,
-    };
+        };
 
-    let lines = file_accessor
-        .read_from_byte(target_byte, page_lines)
-        .await?;
-    let highlights_vec = if let Some(spec) = highlights {
-        compute_highlights(search_engine, &spec, &lines)?
-    } else {
-        vec![Vec::new(); lines.len()]
-    };
+        let (direction, options, pattern) = ctx_snapshot;
 
-    let file_size = file_accessor.file_size();
-    let at_eof = if lines.is_empty() {
-        true
-    } else {
-        let next_start = file_accessor
-            .next_page_start(target_byte, page_lines.max(1))
-            .await?;
-        next_start >= file_size
-    };
-
-    Ok(SearchResponse::ViewportLoaded {
-        request_id,
-        top_byte: target_byte,
-        lines,
-        highlights: highlights_vec,
-        at_eof,
-        file_size,
-    })
-}
-
-fn compute_highlights(
-    search_engine: &RipgrepEngine,
-    spec: &SearchHighlightSpec,
-    lines: &[String],
-) -> Result<Vec<Vec<(usize, usize)>>> {
-    let mut all_highlights = Vec::with_capacity(lines.len());
-    for line in lines {
-        let ranges = search_engine.get_line_matches(&spec.pattern, line, &spec.options)?;
-        all_highlights.push(ranges);
-    }
-    Ok(all_highlights)
-}
-
-async fn execute_search(
-    request_id: RequestId,
-    search_engine: &mut RipgrepEngine,
-    context: &mut Option<SearchContext>,
-    pattern: String,
-    direction: SearchDirection,
-    options: SearchOptions,
-    origin_byte: u64,
-) -> SearchResponse {
-    let mut new_context = SearchContext {
-        pattern: pattern.clone(),
-        direction,
-        options: options.clone(),
-        last_match_byte: None,
-    };
-
-    let search_future = match direction {
-        SearchDirection::Forward => search_engine.search_from(&pattern, origin_byte, &options),
-        SearchDirection::Backward => search_engine.search_prev(&pattern, origin_byte, &options),
-    };
-
-    match search_future.await {
-        Ok(Some(byte)) => {
-            new_context.last_match_byte = Some(byte);
-            *context = Some(new_context);
-            SearchResponse::SearchCompleted {
-                request_id,
-                match_byte: Some(byte),
-                message: None,
+        let start_byte = match self
+            .start_position_for_navigation(traversal, direction, current_top)
+            .await
+        {
+            Ok(byte) => byte,
+            Err(error) => {
+                return SearchResponse::Error { request_id, error };
             }
-        }
-        Ok(None) => {
-            *context = Some(new_context);
-            SearchResponse::SearchCompleted {
+        };
+
+        let result = match (traversal, direction) {
+            (MatchTraversal::Next, SearchDirection::Forward)
+            | (MatchTraversal::Previous, SearchDirection::Backward) => {
+                self.search_engine
+                    .search_from(pattern.as_ref(), start_byte, &options)
+                    .await
+            }
+            _ => {
+                self.search_engine
+                    .search_prev(pattern.as_ref(), start_byte, &options)
+                    .await
+            }
+        };
+
+        match result {
+            Ok(Some(byte)) => {
+                if let Some(ctx) = self.context.as_mut() {
+                    ctx.last_match_byte = Some(byte);
+                }
+                SearchResponse::SearchCompleted {
+                    request_id,
+                    match_byte: Some(byte),
+                    message: None,
+                }
+            }
+            Ok(None) => SearchResponse::SearchCompleted {
                 request_id,
                 match_byte: None,
                 message: Some("Pattern not found".to_string()),
-            }
+            },
+            Err(error) => SearchResponse::Error { request_id, error },
         }
-        Err(err) => SearchResponse::Error {
-            request_id,
-            error: err,
-        },
+    }
+
+    async fn resolve_viewport_target(
+        &self,
+        top: ViewportRequest,
+        page_lines: usize,
+    ) -> Result<u64> {
+        let target_byte = match top {
+            ViewportRequest::Absolute(byte) => byte,
+            ViewportRequest::RelativeLines { anchor, lines } => {
+                if lines == 0 {
+                    anchor
+                } else if lines > 0 {
+                    self.file_accessor
+                        .next_page_start(anchor, lines as usize)
+                        .await?
+                } else {
+                    self.file_accessor
+                        .prev_page_start(anchor, (-lines) as usize)
+                        .await?
+                }
+            }
+            ViewportRequest::EndOfFile => self.file_accessor.last_page_start(page_lines).await?,
+        };
+        Ok(target_byte)
+    }
+
+    fn compute_highlights(
+        &self,
+        spec: &SearchHighlightSpec,
+        lines: &[String],
+    ) -> Result<Vec<Vec<(usize, usize)>>> {
+        let mut all_highlights = Vec::with_capacity(lines.len());
+        for line in lines {
+            let ranges = self
+                .search_engine
+                .get_line_matches(&spec.pattern, line, &spec.options)?;
+            all_highlights.push(ranges);
+        }
+        Ok(all_highlights)
+    }
+
+    async fn detect_eof(
+        &self,
+        top_byte: u64,
+        page_lines: usize,
+        file_size: u64,
+        lines: &[String],
+    ) -> Result<bool> {
+        if lines.is_empty() {
+            return Ok(true);
+        }
+
+        let next_start = self
+            .file_accessor
+            .next_page_start(top_byte, page_lines.max(1))
+            .await?;
+        Ok(next_start >= file_size)
+    }
+
+    async fn start_position_for_navigation(
+        &self,
+        traversal: MatchTraversal,
+        direction: SearchDirection,
+        current_top: u64,
+    ) -> Result<u64> {
+        match (traversal, direction) {
+            (MatchTraversal::Next, SearchDirection::Forward)
+            | (MatchTraversal::Previous, SearchDirection::Backward) => {
+                self.next_line_start(current_top).await
+            }
+            _ => self.prev_line_start(current_top).await,
+        }
+    }
+
+    async fn next_line_start(&self, current_byte: u64) -> Result<u64> {
+        let new_byte = self.file_accessor.next_page_start(current_byte, 1).await?;
+        if new_byte == self.file_accessor.file_size() {
+            Ok(current_byte)
+        } else {
+            Ok(new_byte)
+        }
+    }
+
+    async fn prev_line_start(&self, current_byte: u64) -> Result<u64> {
+        if current_byte == 0 {
+            Ok(0)
+        } else {
+            self.file_accessor.prev_page_start(current_byte, 1).await
+        }
     }
 }
 
-async fn navigate_match(
-    request_id: RequestId,
-    file_accessor: &Arc<dyn FileAccessor>,
-    search_engine: &mut RipgrepEngine,
-    context: &mut Option<SearchContext>,
-    traversal: MatchTraversal,
-    current_top: u64,
-) -> SearchResponse {
-    let ctx = match context.as_mut() {
-        Some(ctx) => ctx,
-        None => {
-            return SearchResponse::SearchCompleted {
-                request_id,
-                match_byte: None,
-                message: Some("No active search".to_string()),
-            };
-        }
-    };
-
-    let options = ctx.options.clone();
-    let pattern = ctx.pattern.clone();
-
-    let start_result = match traversal {
-        MatchTraversal::Next => {
-            if ctx.direction == SearchDirection::Forward {
-                next_line_start(file_accessor, current_top).await
-            } else {
-                prev_line_start(file_accessor, current_top).await
-            }
-        }
-        MatchTraversal::Previous => {
-            if ctx.direction == SearchDirection::Forward {
-                prev_line_start(file_accessor, current_top).await
-            } else {
-                next_line_start(file_accessor, current_top).await
-            }
-        }
-    };
-
-    let start_byte = match start_result {
-        Ok(byte) => byte,
-        Err(err) => {
-            return SearchResponse::Error {
-                request_id,
-                error: err,
-            };
-        }
-    };
-
-    let search_future = match traversal {
-        MatchTraversal::Next => match ctx.direction {
-            SearchDirection::Forward => search_engine.search_from(&pattern, start_byte, &options),
-            SearchDirection::Backward => search_engine.search_prev(&pattern, start_byte, &options),
-        },
-        MatchTraversal::Previous => match ctx.direction {
-            SearchDirection::Forward => search_engine.search_prev(&pattern, start_byte, &options),
-            SearchDirection::Backward => search_engine.search_from(&pattern, start_byte, &options),
-        },
-    };
-
-    match search_future.await {
-        Ok(Some(byte)) => {
-            ctx.last_match_byte = Some(byte);
-            SearchResponse::SearchCompleted {
-                request_id,
-                match_byte: Some(byte),
-                message: None,
-            }
-        }
-        Ok(None) => SearchResponse::SearchCompleted {
-            request_id,
-            match_byte: None,
-            message: Some("Pattern not found".to_string()),
-        },
-        Err(err) => SearchResponse::Error {
-            request_id,
-            error: err,
-        },
-    }
+struct HandlerOutcome {
+    response: Option<SearchResponse>,
+    done: bool,
 }
 
-async fn next_line_start(file_accessor: &Arc<dyn FileAccessor>, current_byte: u64) -> Result<u64> {
-    let new_byte = file_accessor.next_page_start(current_byte, 1).await?;
-    if new_byte == file_accessor.file_size() {
-        Ok(current_byte)
-    } else {
-        Ok(new_byte)
+impl HandlerOutcome {
+    fn respond(response: SearchResponse) -> Self {
+        Self {
+            response: Some(response),
+            done: false,
+        }
     }
-}
 
-async fn prev_line_start(file_accessor: &Arc<dyn FileAccessor>, current_byte: u64) -> Result<u64> {
-    if current_byte == 0 {
-        Ok(0)
-    } else {
-        file_accessor.prev_page_start(current_byte, 1).await
+    fn continue_without_response() -> Self {
+        Self {
+            response: None,
+            done: false,
+        }
+    }
+
+    fn exit() -> Self {
+        Self {
+            response: None,
+            done: true,
+        }
     }
 }

@@ -9,15 +9,16 @@ use crate::input::{InputAction, ScrollDirection};
 use crate::render::protocol::{
     MatchTraversal, RequestId, SearchCommand, SearchHighlightSpec, SearchResponse, ViewportRequest,
 };
+use crate::render::ui::ViewState;
 use crate::search::SearchOptions;
-use crate::ui::ViewState;
+use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio::time::{self, Duration};
 
 /// Tracks render-related state that must persist across input actions and worker responses.
 #[derive(Default)]
 pub struct RenderLoopState {
-    search_state: Option<SearchHighlightSpec>,
+    search_state: Option<Arc<SearchHighlightSpec>>,
 }
 
 impl RenderLoopState {
@@ -25,21 +26,72 @@ impl RenderLoopState {
         Self { search_state: None }
     }
 
-    pub fn highlight_spec(&self) -> Option<SearchHighlightSpec> {
-        self.search_state.as_ref().map(|state| SearchHighlightSpec {
-            pattern: state.pattern.clone(),
-            options: state.options.clone(),
-        })
+    pub fn highlight_spec(&self) -> Option<Arc<SearchHighlightSpec>> {
+        self.search_state.clone()
     }
 
     pub fn clear_search(&mut self) {
         self.search_state = None;
     }
 
-    pub fn set_search(&mut self, search: SearchHighlightSpec) {
+    pub fn set_search(&mut self, search: Arc<SearchHighlightSpec>) {
         self.search_state = Some(search);
     }
 
+    fn ensure_active_search(&self, view_state: &mut ViewState) -> bool {
+        if self.search_state.is_some() {
+            true
+        } else {
+            view_state
+                .status_line
+                .set_message("No active search".to_string());
+            false
+        }
+    }
+
+    async fn queue_viewport_update(
+        &self,
+        request: ViewportRequest,
+        view_state: &mut ViewState,
+        search_tx: &mut Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+        latest_view_request: &mut Option<RequestId>,
+    ) -> Result<bool> {
+        view_state.at_eof = false;
+        self.request_viewport(
+            request,
+            view_state,
+            search_tx,
+            next_request_id,
+            latest_view_request,
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn queue_match_navigation(
+        &self,
+        traversal: MatchTraversal,
+        view_state: &mut ViewState,
+        search_tx: &mut Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+        latest_search_request: &mut Option<RequestId>,
+    ) -> Result<bool> {
+        let request_id = *next_request_id;
+        *next_request_id += 1;
+        *latest_search_request = Some(request_id);
+        search_tx
+            .send(SearchCommand::NavigateMatch {
+                request_id,
+                traversal,
+                current_top: view_state.viewport_top_byte,
+            })
+            .await
+            .map_err(|_| RllessError::other("search worker unavailable"))?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn process_action(
         &mut self,
         action: InputAction,
@@ -48,17 +100,16 @@ impl RenderLoopState {
         next_request_id: &mut RequestId,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
-        pending_search_state: &mut Option<(RequestId, SearchHighlightSpec)>,
+        pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
     ) -> Result<bool> {
         match action {
             InputAction::Quit => Ok(false),
             InputAction::Scroll { direction, lines } => {
-                view_state.at_eof = false;
                 let delta = match direction {
                     ScrollDirection::Up => -(lines as i64),
                     ScrollDirection::Down => lines as i64,
                 };
-                self.request_viewport(
+                self.queue_viewport_update(
                     ViewportRequest::RelativeLines {
                         anchor: view_state.viewport_top_byte,
                         lines: delta,
@@ -68,12 +119,10 @@ impl RenderLoopState {
                     next_request_id,
                     latest_view_request,
                 )
-                .await?;
-                Ok(true)
+                .await
             }
             InputAction::PageUp => {
-                view_state.at_eof = false;
-                self.request_viewport(
+                self.queue_viewport_update(
                     ViewportRequest::RelativeLines {
                         anchor: view_state.viewport_top_byte,
                         lines: -(view_state.lines_per_page() as i64),
@@ -83,12 +132,10 @@ impl RenderLoopState {
                     next_request_id,
                     latest_view_request,
                 )
-                .await?;
-                Ok(true)
+                .await
             }
             InputAction::PageDown => {
-                view_state.at_eof = false;
-                self.request_viewport(
+                self.queue_viewport_update(
                     ViewportRequest::RelativeLines {
                         anchor: view_state.viewport_top_byte,
                         lines: view_state.lines_per_page() as i64,
@@ -98,32 +145,27 @@ impl RenderLoopState {
                     next_request_id,
                     latest_view_request,
                 )
-                .await?;
-                Ok(true)
+                .await
             }
             InputAction::GoToStart => {
-                view_state.at_eof = false;
-                self.request_viewport(
+                self.queue_viewport_update(
                     ViewportRequest::Absolute(0),
                     view_state,
                     search_tx,
                     next_request_id,
                     latest_view_request,
                 )
-                .await?;
-                Ok(true)
+                .await
             }
             InputAction::GoToEnd => {
-                view_state.at_eof = false;
-                self.request_viewport(
+                self.queue_viewport_update(
                     ViewportRequest::EndOfFile,
                     view_state,
                     search_tx,
                     next_request_id,
                     latest_view_request,
                 )
-                .await?;
-                Ok(true)
+                .await
             }
             InputAction::StartSearch(direction) => {
                 view_state.status_line.set_search_prompt(direction);
@@ -159,19 +201,20 @@ impl RenderLoopState {
                 }
 
                 let options = SearchOptions::default();
+                let pattern: Arc<str> = Arc::from(trimmed.to_string());
                 let request_id = *next_request_id;
                 *next_request_id += 1;
                 *latest_search_request = Some(request_id);
-                let highlight = SearchHighlightSpec {
-                    pattern: trimmed.to_string(),
+                let highlight = Arc::new(SearchHighlightSpec {
+                    pattern: Arc::clone(&pattern),
                     options: options.clone(),
-                };
-                pending_search_state.replace((request_id, highlight.clone()));
+                });
+                pending_search_state.replace((request_id, Arc::clone(&highlight)));
 
                 search_tx
                     .send(SearchCommand::ExecuteSearch {
                         request_id,
-                        pattern: trimmed.to_string(),
+                        pattern,
                         direction,
                         options,
                         origin_byte: view_state.viewport_top_byte,
@@ -181,44 +224,30 @@ impl RenderLoopState {
                 Ok(true)
             }
             InputAction::NextMatch => {
-                if self.search_state.is_none() {
-                    view_state
-                        .status_line
-                        .set_message("No active search".to_string());
+                if !self.ensure_active_search(view_state) {
                     return Ok(true);
                 }
-                let request_id = *next_request_id;
-                *next_request_id += 1;
-                *latest_search_request = Some(request_id);
-                search_tx
-                    .send(SearchCommand::NavigateMatch {
-                        request_id,
-                        traversal: MatchTraversal::Next,
-                        current_top: view_state.viewport_top_byte,
-                    })
-                    .await
-                    .map_err(|_| RllessError::other("search worker unavailable"))?;
-                Ok(true)
+                self.queue_match_navigation(
+                    MatchTraversal::Next,
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_search_request,
+                )
+                .await
             }
             InputAction::PreviousMatch => {
-                if self.search_state.is_none() {
-                    view_state
-                        .status_line
-                        .set_message("No active search".to_string());
+                if !self.ensure_active_search(view_state) {
                     return Ok(true);
                 }
-                let request_id = *next_request_id;
-                *next_request_id += 1;
-                *latest_search_request = Some(request_id);
-                search_tx
-                    .send(SearchCommand::NavigateMatch {
-                        request_id,
-                        traversal: MatchTraversal::Previous,
-                        current_top: view_state.viewport_top_byte,
-                    })
-                    .await
-                    .map_err(|_| RllessError::other("search worker unavailable"))?;
-                Ok(true)
+                self.queue_match_navigation(
+                    MatchTraversal::Previous,
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_search_request,
+                )
+                .await
             }
             InputAction::Resize { width, height } => {
                 if view_state.update_terminal_size(width, height) {
@@ -237,13 +266,14 @@ impl RenderLoopState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_response(
         &mut self,
         response: SearchResponse,
         view_state: &mut ViewState,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
-        pending_search_state: &mut Option<(RequestId, SearchHighlightSpec)>,
+        pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
         search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
     ) -> Result<()> {
@@ -345,9 +375,131 @@ impl RenderLoopState {
     }
 }
 
+/// Orchestrates the main render loop once channels have been wired.
+pub struct RenderCoordinator;
+
+impl RenderCoordinator {
+    #[allow(clippy::too_many_arguments)]
+    async fn process_pending_actions(
+        state: &mut RenderLoopState,
+        actions: &mut Vec<InputAction>,
+        view_state: &mut ViewState,
+        search_tx: &mut Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+        latest_view_request: &mut Option<RequestId>,
+        latest_search_request: &mut Option<RequestId>,
+        pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
+    ) -> Result<bool> {
+        for action in actions.drain(..) {
+            if !state
+                .process_action(
+                    action,
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                    latest_search_request,
+                    pending_search_state,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn drain_search_responses(
+        state: &mut RenderLoopState,
+        view_state: &mut ViewState,
+        search_resp_rx: &mut tokio::sync::mpsc::Receiver<SearchResponse>,
+        latest_view_request: &mut Option<RequestId>,
+        latest_search_request: &mut Option<RequestId>,
+        pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
+        search_tx: &mut Sender<SearchCommand>,
+        next_request_id: &mut RequestId,
+    ) -> Result<()> {
+        while let Ok(response) = search_resp_rx.try_recv() {
+            state
+                .handle_response(
+                    response,
+                    view_state,
+                    latest_view_request,
+                    latest_search_request,
+                    pending_search_state,
+                    search_tx,
+                    next_request_id,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run(
+        state: &mut RenderLoopState,
+        view_state: &mut ViewState,
+        ui_renderer: &mut dyn crate::render::ui::UIRenderer,
+        input_rx: &mut UnboundedReceiver<InputAction>,
+        search_tx: &mut Sender<SearchCommand>,
+        search_resp_rx: &mut tokio::sync::mpsc::Receiver<SearchResponse>,
+        next_request_id: &mut RequestId,
+        latest_view_request: &mut Option<RequestId>,
+        latest_search_request: &mut Option<RequestId>,
+        pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
+    ) -> Result<()> {
+        let mut interval = time::interval(Duration::from_millis(16));
+        let mut action_buffer = Vec::new();
+        let mut running = true;
+
+        while running {
+            interval.tick().await;
+
+            while let Ok(action) = input_rx.try_recv() {
+                action_buffer.push(action);
+            }
+
+            running = running
+                && Self::process_pending_actions(
+                    state,
+                    &mut action_buffer,
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                    latest_search_request,
+                    pending_search_state,
+                )
+                .await?;
+
+            if !running {
+                break;
+            }
+
+            Self::drain_search_responses(
+                state,
+                view_state,
+                search_resp_rx,
+                latest_view_request,
+                latest_search_request,
+                pending_search_state,
+                search_tx,
+                next_request_id,
+            )
+            .await?;
+
+            ui_renderer.render(view_state)?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod state_tests {
     use super::*;
+    use crate::input::InputStateMachine;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -371,71 +523,5 @@ mod state_tests {
                 lines: 1,
             }
         );
-    }
-}
-
-/// Orchestrates the main render loop once channels have been wired.
-pub struct RenderCoordinator;
-
-impl RenderCoordinator {
-    pub async fn run(
-        state: &mut RenderLoopState,
-        view_state: &mut ViewState,
-        ui_renderer: &mut dyn crate::ui::UIRenderer,
-        input_rx: &mut UnboundedReceiver<InputAction>,
-        search_tx: &mut Sender<SearchCommand>,
-        search_resp_rx: &mut tokio::sync::mpsc::Receiver<SearchResponse>,
-        next_request_id: &mut RequestId,
-        latest_view_request: &mut Option<RequestId>,
-        latest_search_request: &mut Option<RequestId>,
-        pending_search_state: &mut Option<(RequestId, SearchHighlightSpec)>,
-    ) -> Result<()> {
-        let mut interval = time::interval(Duration::from_millis(16));
-        let mut action_buffer = Vec::new();
-        let mut running = true;
-
-        while running {
-            interval.tick().await;
-
-            while let Ok(action) = input_rx.try_recv() {
-                action_buffer.push(action);
-            }
-
-            for action in action_buffer.drain(..) {
-                if !state
-                    .process_action(
-                        action,
-                        view_state,
-                        search_tx,
-                        next_request_id,
-                        latest_view_request,
-                        latest_search_request,
-                        pending_search_state,
-                    )
-                    .await?
-                {
-                    running = false;
-                    break;
-                }
-            }
-
-            while let Ok(response) = search_resp_rx.try_recv() {
-                state
-                    .handle_response(
-                        response,
-                        view_state,
-                        latest_view_request,
-                        latest_search_request,
-                        pending_search_state,
-                        search_tx,
-                        next_request_id,
-                    )
-                    .await?;
-            }
-
-            ui_renderer.render(view_state)?;
-        }
-
-        Ok(())
     }
 }

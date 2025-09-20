@@ -3,7 +3,7 @@
 //! This module contains viewport state for rendering. Search operations
 //! are handled by SearchEngine, not ViewState.
 
-use crate::ui::SearchDirection;
+use crate::input::SearchDirection;
 use std::path::{Path, PathBuf};
 
 /// Viewport state for rendering - focused only on what's currently visible

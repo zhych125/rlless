@@ -259,6 +259,7 @@ mod tests {
             }
         );
 
+        std::thread::sleep(Duration::from_millis(DEFAULT_COALESCE_WINDOW_MS + 1));
         let second = collector.try_flush().unwrap();
         assert_eq!(
             second,

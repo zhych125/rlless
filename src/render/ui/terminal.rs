@@ -5,8 +5,9 @@
 //! and SearchEngine components rather than managing data itself.
 
 use crate::error::Result;
-use crate::input::InputAction;
-use crate::ui::{ColorTheme, UIRenderer, ViewState};
+use crate::render::ui::renderer::UIRenderer;
+use crate::render::ui::state::ViewState;
+use crate::render::ui::theme::ColorTheme;
 use ratatui::crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -21,7 +22,6 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
-use std::time::Duration;
 
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -159,13 +159,6 @@ impl UIRenderer for TerminalUI {
         Ok(())
     }
 
-    fn handle_input(&mut self, _timeout: Option<Duration>) -> Result<Option<InputAction>> {
-        // The standalone render loop no longer polls input directly; background threads provide
-        // actions via channels. This implementation remains for compatibility with legacy tests
-        // and returns `None` to signal "no input".
-        Ok(None)
-    }
-
     fn initialize(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -230,11 +223,5 @@ mod tests {
         let ui_with_theme = TerminalUI::with_theme(custom_theme).unwrap();
         assert_eq!(ui_with_theme.theme.status_fg, Color::White);
         assert_eq!(ui_with_theme.theme.status_bg, Color::Black);
-    }
-
-    #[test]
-    fn test_handle_input_noop() {
-        let mut ui = TerminalUI::new().unwrap();
-        assert_eq!(ui.handle_input(None).unwrap(), None);
     }
 }

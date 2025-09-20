@@ -1,15 +1,19 @@
-//! Renderer implementation scaffolding.
+//! Terminal rendering components.
 //!
-//! Concrete terminal rendering (currently `TerminalUI`) will move here in later phases.
+//! This module hosts the concrete terminal UI implementation along with the supporting view/state
+//! structures and styling utilities.
 
-use crate::error::Result;
-use crate::ui::ViewState;
+pub mod renderer;
+pub mod state;
+pub mod terminal;
+pub mod theme;
 
-/// Placeholder trait for renderers. Once migrated, this will likely mirror the existing
-/// `UIRenderer` trait.
-pub trait Renderer {
-    /// Render the current view.
-    fn render(&mut self, _view_state: &ViewState) -> Result<()> {
-        Ok(())
-    }
-}
+pub use renderer::UIRenderer;
+pub use state::{DisplayMode, StatusLine, ViewState};
+pub use terminal::TerminalUI;
+pub use theme::ColorTheme;
+
+#[cfg(test)]
+pub use renderer::tests::MockUIRenderer;
+
+pub use ratatui::style::{Color, Style};

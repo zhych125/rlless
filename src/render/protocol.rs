@@ -3,6 +3,7 @@
 use crate::error::RllessError;
 use crate::input::SearchDirection;
 use crate::search::SearchOptions;
+use std::sync::Arc;
 
 /// Identifier attached to cross-thread requests so responses can be correlated.
 pub type RequestId = u64;
@@ -21,7 +22,7 @@ pub enum ViewportRequest {
 /// Active search context used to compute highlights inside the viewport worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHighlightSpec {
-    pub pattern: String,
+    pub pattern: Arc<str>,
     pub options: SearchOptions,
 }
 
@@ -36,7 +37,7 @@ pub enum MatchTraversal {
 /// resume searches without re-sending all parameters every time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchContext {
-    pub pattern: String,
+    pub pattern: Arc<str>,
     pub direction: SearchDirection,
     pub options: SearchOptions,
     pub last_match_byte: Option<u64>,
@@ -49,11 +50,11 @@ pub enum SearchCommand {
         request_id: RequestId,
         top: ViewportRequest,
         page_lines: usize,
-        highlights: Option<SearchHighlightSpec>,
+        highlights: Option<Arc<SearchHighlightSpec>>,
     },
     ExecuteSearch {
         request_id: RequestId,
-        pattern: String,
+        pattern: Arc<str>,
         direction: SearchDirection,
         options: SearchOptions,
         origin_byte: u64,

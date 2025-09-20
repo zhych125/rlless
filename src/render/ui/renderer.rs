@@ -1,11 +1,10 @@
 //! UI renderer trait and event handling
 //!
-//! This module defines the UIRenderer trait for rendering terminal interfaces
-//! and handling user input events in an event-driven architecture.
+//! This module defines the `UIRenderer` trait for rendering terminal interfaces and managing
+//! lifecycle hooks such as initialization and cleanup.
 
 use crate::error::Result;
-use crate::ui::{InputAction, ViewState};
-use std::time::Duration;
+use crate::render::ui::state::ViewState;
 
 /// Core trait for UI rendering and event handling
 pub trait UIRenderer {
@@ -17,15 +16,6 @@ pub trait UIRenderer {
     /// - Update the status line
     /// - Handle terminal resizing
     fn render(&mut self, view_state: &ViewState) -> Result<()>;
-
-    /// Handle user input and return the next input action
-    ///
-    /// This method should:
-    /// - Block until user input or timeout
-    /// - Parse key combinations into InputActions
-    /// - Handle mode-specific input (search input vs navigation)
-    /// - Return None on timeout for periodic updates
-    fn handle_input(&mut self, timeout: Option<Duration>) -> Result<Option<InputAction>>;
 
     /// Initialize the terminal UI
     ///
@@ -51,19 +41,14 @@ pub trait UIRenderer {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::ui::{InputAction, ScrollDirection};
-    use std::collections::VecDeque;
+    use crate::render::ui::state::ViewState;
 
     /// Mock UI renderer for testing
     ///
-    /// This mock allows tests to:
-    /// - Verify render calls were made
-    /// - Simulate user input sequences
-    /// - Test UI command generation
+    /// This mock allows tests to verify render invocations and terminal sizing logic.
     pub struct MockUIRenderer {
         pub render_count: usize,
         pub terminal_size: (u16, u16),
-        pub input_sequence: VecDeque<InputAction>,
         pub is_initialized: bool,
     }
 
@@ -79,14 +64,8 @@ pub mod tests {
             Self {
                 render_count: 0,
                 terminal_size: (80, 24),
-                input_sequence: VecDeque::new(),
                 is_initialized: false,
             }
-        }
-
-        /// Add a command to the input sequence for testing
-        pub fn add_input(&mut self, action: InputAction) {
-            self.input_sequence.push_back(action);
         }
 
         /// Set terminal size for testing
@@ -99,10 +78,6 @@ pub mod tests {
         fn render(&mut self, _view_state: &ViewState) -> Result<()> {
             self.render_count += 1;
             Ok(())
-        }
-
-        fn handle_input(&mut self, _timeout: Option<Duration>) -> Result<Option<InputAction>> {
-            Ok(self.input_sequence.pop_front())
         }
 
         fn initialize(&mut self) -> Result<()> {
@@ -137,20 +112,6 @@ pub mod tests {
         renderer.render(&view_state).unwrap();
         assert_eq!(renderer.render_count, 1);
 
-        // Test input simulation
-        renderer.add_input(InputAction::Scroll {
-            direction: ScrollDirection::Down,
-            lines: 1,
-        });
-        let cmd = renderer.handle_input(None).unwrap();
-        assert_eq!(
-            cmd,
-            Some(InputAction::Scroll {
-                direction: ScrollDirection::Down,
-                lines: 1,
-            })
-        );
-
         // Test terminal size
         let size = renderer.get_terminal_size().unwrap();
         assert_eq!(size, (80, 24));
@@ -160,27 +121,9 @@ pub mod tests {
     }
 
     #[test]
-    fn test_mock_renderer_input_sequence() {
+    fn test_mock_renderer_resize_handling() {
         let mut renderer = MockUIRenderer::new();
-
-        // Add multiple commands
-        renderer.add_input(InputAction::PageDown);
-        renderer.add_input(InputAction::GoToEnd);
-        renderer.add_input(InputAction::Quit);
-
-        // Verify they come out in order
-        assert_eq!(
-            renderer.handle_input(None).unwrap(),
-            Some(InputAction::PageDown)
-        );
-        assert_eq!(
-            renderer.handle_input(None).unwrap(),
-            Some(InputAction::GoToEnd)
-        );
-        assert_eq!(
-            renderer.handle_input(None).unwrap(),
-            Some(InputAction::Quit)
-        );
-        assert_eq!(renderer.handle_input(None).unwrap(), None);
+        renderer.set_terminal_size(120, 30);
+        assert_eq!(renderer.get_terminal_size().unwrap(), (120, 30));
     }
 }

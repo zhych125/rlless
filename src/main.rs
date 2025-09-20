@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     }
 
     // Initialize the Application and start the interactive event loop
-    use rlless::ui::TerminalUI;
+    use rlless::render::ui::TerminalUI;
     use rlless::Application;
 
     let ui_renderer = Box::new(TerminalUI::new()?);

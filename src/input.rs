@@ -9,5 +9,6 @@ pub mod service;
 // Public re-exports for convenience. Modules outside this crate should prefer importing
 // from `crate::input` rather than reaching into submodules.
 pub use service::{
-    InputAction, InputService, InputState, InputStateMachine, ScrollDirection, SearchDirection,
+    spawn_input_thread, InputAction, InputService, InputState, InputStateMachine, ScrollDirection,
+    SearchDirection,
 };

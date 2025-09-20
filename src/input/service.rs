@@ -6,8 +6,11 @@
 use crate::error::Result;
 use crate::input::raw::{RawInputCollector, RawInputEvent};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Current input mode (`less` navigation vs search prompt).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -245,7 +248,6 @@ impl Default for InputStateMachine {
 pub struct InputService {
     state_machine: InputStateMachine,
     raw_input: RawInputCollector,
-    pending_actions: VecDeque<InputAction>,
 }
 
 impl InputService {
@@ -253,57 +255,48 @@ impl InputService {
         Self {
             state_machine: InputStateMachine::new(),
             raw_input: RawInputCollector::new(),
-            pending_actions: VecDeque::new(),
         }
     }
 
-    pub fn poll_action(&mut self, timeout: Option<Duration>) -> Result<Option<InputAction>> {
-        if let Some(action) = self.pending_actions.pop_front() {
-            return Ok(Some(action));
-        }
+    pub fn poll_actions(&mut self, timeout: Option<Duration>) -> Result<Vec<InputAction>> {
+        let mut actions = Vec::new();
 
         if let Some(raw_event) = self.raw_input.poll_event(timeout)? {
-            self.process_raw_event(raw_event);
-            return Ok(self.pending_actions.pop_front());
+            if let Some(action) = self.process_raw_event(raw_event) {
+                actions.push(action);
+            }
+
+            while let Some(extra_event) = self.raw_input.try_flush() {
+                if let Some(action) = self.process_raw_event(extra_event) {
+                    actions.push(action);
+                }
+            }
         }
 
-        Ok(None)
+        Ok(actions)
     }
 
-    pub fn process_event(&mut self, event: Event) {
+    pub fn process_event(&mut self, event: Event) -> Vec<InputAction> {
+        let mut actions = Vec::new();
         self.raw_input.process_event(event);
         while let Some(raw_event) = self.raw_input.try_flush() {
-            self.process_raw_event(raw_event);
-        }
-    }
-
-    pub fn try_take_action(&mut self) -> Option<InputAction> {
-        self.pending_actions.pop_front()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.pending_actions.is_empty() && self.raw_input.is_idle()
-    }
-
-    fn process_raw_event(&mut self, event: RawInputEvent) {
-        match event {
-            RawInputEvent::Key(key_event) => {
-                let action = self.state_machine.handle_key_event(key_event);
-                self.queue_action(action);
-            }
-            RawInputEvent::Resize { width, height } => {
-                self.queue_action(InputAction::Resize { width, height });
-            }
-            RawInputEvent::Scroll { direction, lines } => {
-                self.queue_action(InputAction::Scroll { direction, lines });
+            if let Some(action) = self.process_raw_event(raw_event) {
+                actions.push(action);
             }
         }
+        actions
     }
 
-    fn queue_action(&mut self, action: InputAction) {
+    fn process_raw_event(&mut self, event: RawInputEvent) -> Option<InputAction> {
+        let action = match event {
+            RawInputEvent::Key(key_event) => self.state_machine.handle_key_event(key_event),
+            RawInputEvent::Resize { width, height } => InputAction::Resize { width, height },
+            RawInputEvent::Scroll { direction, lines } => InputAction::Scroll { direction, lines },
+        };
+
         match action {
-            InputAction::NoAction | InputAction::InvalidInput => {}
-            _ => self.pending_actions.push_back(action),
+            InputAction::NoAction | InputAction::InvalidInput => None,
+            _ => Some(action),
         }
     }
 }
@@ -312,6 +305,32 @@ impl Default for InputService {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Spawn a blocking thread that polls for terminal events and forwards actions to the render loop.
+pub fn spawn_input_thread(
+    tx: UnboundedSender<InputAction>,
+    shutdown: Arc<AtomicBool>,
+    poll_interval: Duration,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut service = InputService::new();
+        while !shutdown.load(Ordering::SeqCst) {
+            match service.poll_actions(Some(poll_interval)) {
+                Ok(actions) => {
+                    for action in actions {
+                        if tx.send(action).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Input thread error: {}", err);
+                    break;
+                }
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -336,40 +355,93 @@ mod tests {
     #[test]
     fn mouse_scrolls_are_coalesced_upstream() {
         let mut service = InputService::new();
-        service.process_event(mouse(MouseEventKind::ScrollDown));
-        service.process_event(mouse(MouseEventKind::ScrollDown));
+        assert!(service
+            .process_event(mouse(MouseEventKind::ScrollDown))
+            .is_empty());
+        assert!(service
+            .process_event(mouse(MouseEventKind::ScrollDown))
+            .is_empty());
         std::thread::sleep(Duration::from_millis(13));
-        service.process_event(Event::Resize(80, 24));
+        let actions = service.process_event(Event::Resize(80, 24));
 
-        let action = service.try_take_action().unwrap();
         assert_eq!(
-            action,
-            InputAction::Scroll {
-                direction: ScrollDirection::Down,
-                lines: 6,
-            }
+            actions,
+            vec![
+                InputAction::Scroll {
+                    direction: ScrollDirection::Down,
+                    lines: 6,
+                },
+                InputAction::Resize {
+                    width: 80,
+                    height: 24,
+                },
+            ]
         );
     }
 
     #[test]
     fn keyboard_events_pass_through_state_machine() {
         let mut service = InputService::new();
-        service.process_event(key(KeyCode::Char('j')));
-        service.process_event(key(KeyCode::Char('k')));
+        let down = service.process_event(key(KeyCode::Char('j')));
+        let up = service.process_event(key(KeyCode::Char('k')));
 
         assert_eq!(
-            service.try_take_action().unwrap(),
-            InputAction::Scroll {
+            down,
+            vec![InputAction::Scroll {
                 direction: ScrollDirection::Down,
                 lines: 1,
-            }
+            }]
         );
         assert_eq!(
-            service.try_take_action().unwrap(),
-            InputAction::Scroll {
+            up,
+            vec![InputAction::Scroll {
                 direction: ScrollDirection::Up,
                 lines: 1,
-            }
+            }]
+        );
+    }
+
+    #[test]
+    fn poll_actions_flushes_pending_events() {
+        let mut service = InputService::new();
+        service
+            .raw_input
+            .process_event(mouse(MouseEventKind::ScrollUp));
+        std::thread::sleep(Duration::from_millis(13));
+        let actions = service
+            .poll_actions(Some(Duration::from_millis(1)))
+            .unwrap();
+
+        assert_eq!(
+            actions,
+            vec![InputAction::Scroll {
+                direction: ScrollDirection::Up,
+                lines: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn mixed_events_preserve_order() {
+        let mut service = InputService::new();
+        assert!(service
+            .process_event(mouse(MouseEventKind::ScrollUp))
+            .is_empty());
+        std::thread::sleep(Duration::from_millis(13));
+        let actions = service.process_event(key(KeyCode::Char('j')));
+
+        assert_eq!(
+            actions,
+            vec![
+                InputAction::Scroll {
+                    direction: ScrollDirection::Up,
+                    lines: 3,
+                },
+                InputAction::Scroll {
+                    direction: ScrollDirection::Down,
+                    lines: 1,
+                },
+            ]
         );
     }
 }

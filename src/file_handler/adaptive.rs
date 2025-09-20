@@ -522,10 +522,11 @@ mod tests {
         let accessor = FileAccessorFactory::create(temp_file.path()).await.unwrap();
 
         // Should use InMemory for small compressed file after decompression
-        match &accessor.source {
-            ByteSource::InMemory(_) => {} // Expected for small compressed files
-            _ => {}                       // Large compressed files might use Compressed variant
-        }
+        assert!(
+            matches!(accessor.source, ByteSource::InMemory(_)),
+            "expected in-memory accessor for small compressed file, found {:?}",
+            accessor.source
+        );
 
         // Test that decompression worked
         let lines = accessor.read_from_byte(0, 3).await.unwrap();

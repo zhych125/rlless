@@ -18,7 +18,7 @@
 //! - [`error`] - Centralized error types and handling
 //! - [`file_handler`] - File access abstraction with memory mapping
 //! - [`search`] - Search engine integration with ripgrep
-//! - [`ui`] - Terminal user interface components
+//! - [`render::ui`](crate::render::ui) - Terminal user interface components
 //! - [`app`] - Application core and component coordination
 
 // Core modules
@@ -32,7 +32,6 @@ pub mod render;
 // Core components
 pub mod app;
 pub mod search;
-pub mod ui;
 
 // Re-export commonly used types for convenience
 pub use error::{Result, RllessError};

@@ -4,18 +4,16 @@
 //! delegates input handling and heavy data operations to background tasks while
 //! keeping rendering single-threaded.
 
-mod runtime;
-
-use crate::app::runtime::spawn_input_thread;
 use crate::error::{Result, RllessError};
 use crate::file_handler::{FileAccessor, FileAccessorFactory};
+use crate::input::spawn_input_thread;
 use crate::input::InputAction;
 use crate::render::protocol::SearchHighlightSpec;
 use crate::render::protocol::{RequestId, SearchCommand, SearchResponse, ViewportRequest};
 use crate::render::service::{RenderCoordinator, RenderLoopState};
+use crate::render::ui::{UIRenderer, ViewState};
 use crate::search::worker::search_worker_loop;
 use crate::search::RipgrepEngine;
-use crate::ui::{UIRenderer, ViewState};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -70,7 +68,7 @@ impl Application {
         #[allow(unused_assignments)]
         let mut latest_view_request: Option<RequestId> = None;
         let mut latest_search_request: Option<RequestId> = None;
-        let mut pending_search_state: Option<(RequestId, SearchHighlightSpec)> = None;
+        let mut pending_search_state: Option<(RequestId, Arc<SearchHighlightSpec>)> = None;
 
         // Prime the viewport with initial content
         let initial_req = next_request_id;

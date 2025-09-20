@@ -404,10 +404,7 @@ mod tests {
         async fn read_from_byte(&self, start_byte: u64, max_lines: usize) -> Result<Vec<String>> {
             if let Some(start_line) = self.find_line_at_byte(start_byte) {
                 let end_line = (start_line + max_lines).min(self.lines.len());
-                Ok(self.lines[start_line..end_line]
-                    .iter()
-                    .map(|s| s.clone())
-                    .collect())
+                Ok(self.lines[start_line..end_line].to_vec())
             } else {
                 Ok(vec![])
             }

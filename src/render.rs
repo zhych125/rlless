@@ -1,11 +1,10 @@
-//! Rendering subsystem scaffolding.
+//! Rendering subsystem modules.
 //!
-//! Phase 1 introduces shells for the render loop, protocol, and renderer so they can be
-//! populated incrementally.
+//! Provides the render coordinator, protocol definitions, and terminal UI components used by the
+//! high-level application.
 
 pub mod protocol;
 pub mod service;
 pub mod ui;
 
-// Re-exports will be added once implementations migrate here.
-// pub use service::RenderService;
+pub use service::{RenderCoordinator, RenderLoopState};
