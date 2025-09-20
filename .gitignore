@@ -22,6 +22,12 @@ Cargo.lock
 # VSCode
 .vscode/
 
+# Zed
+.zed/
+
+# ropeproject
+.ropeproject
+
 # MacOS
 .DS_Store
 
@@ -45,3 +51,6 @@ criterion/
 # Documentation build artifacts
 /target/doc/
 /target/criterion/
+
+*.log
+*.gz

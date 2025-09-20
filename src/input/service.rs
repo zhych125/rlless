@@ -93,6 +93,8 @@ pub struct InputStateMachine {
     search_buffer: String,
     command_buffer: String,
     percent_buffer: String,
+    search_history: Vec<String>,
+    history_cursor: Option<usize>,
 }
 
 impl InputStateMachine {
@@ -102,6 +104,8 @@ impl InputStateMachine {
             search_buffer: String::new(),
             command_buffer: String::new(),
             percent_buffer: String::new(),
+            search_history: Vec::new(),
+            history_cursor: None,
         }
     }
 
@@ -205,6 +209,7 @@ impl InputStateMachine {
                     direction: SearchDirection::Forward,
                 };
                 self.search_buffer.clear();
+                self.history_cursor = None;
                 InputAction::StartSearch(SearchDirection::Forward)
             }
             (InputState::Navigation, KeyCode::Char('?'), modifiers)
@@ -214,17 +219,20 @@ impl InputStateMachine {
                     direction: SearchDirection::Backward,
                 };
                 self.search_buffer.clear();
+                self.history_cursor = None;
                 InputAction::StartSearch(SearchDirection::Backward)
             }
             (InputState::SearchInput { .. }, KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.state = InputState::Navigation;
                 self.search_buffer.clear();
+                self.history_cursor = None;
                 InputAction::CancelSearch
             }
             (InputState::SearchInput { direction }, KeyCode::Char(ch), modifiers)
                 if (ch.is_ascii_graphic() || ch == ' ')
                     && !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
+                self.history_cursor = None;
                 self.search_buffer.push(ch);
                 InputAction::UpdateSearchBuffer {
                     direction,
@@ -232,6 +240,7 @@ impl InputStateMachine {
                 }
             }
             (InputState::SearchInput { direction }, KeyCode::Backspace, _) => {
+                self.history_cursor = None;
                 self.search_buffer.pop();
                 if self.search_buffer.is_empty() {
                     self.state = InputState::Navigation;
@@ -247,17 +256,72 @@ impl InputStateMachine {
                 let pattern = self.search_buffer.clone();
                 self.state = InputState::Navigation;
                 self.search_buffer.clear();
+                self.history_cursor = None;
 
                 if pattern.trim().is_empty() {
                     InputAction::CancelSearch
                 } else {
-                    InputAction::ExecuteSearch { pattern, direction }
+                    let trimmed = pattern.trim().to_string();
+                    self.record_history(&trimmed);
+                    InputAction::ExecuteSearch {
+                        pattern: trimmed,
+                        direction,
+                    }
                 }
             }
             (InputState::SearchInput { .. }, KeyCode::Esc, _) => {
                 self.state = InputState::Navigation;
                 self.search_buffer.clear();
+                self.history_cursor = None;
                 InputAction::CancelSearch
+            }
+            (InputState::SearchInput { direction }, KeyCode::Up, _) => {
+                if self.search_history.is_empty() {
+                    return InputAction::NoAction;
+                }
+
+                let next_index = match self.history_cursor {
+                    None => self.search_history.len().saturating_sub(1),
+                    Some(0) => 0,
+                    Some(idx) => idx.saturating_sub(1),
+                };
+
+                self.history_cursor = Some(next_index);
+                if let Some(entry) = self.search_history.get(next_index) {
+                    self.search_buffer = entry.clone();
+                }
+                InputAction::UpdateSearchBuffer {
+                    direction,
+                    buffer: self.search_buffer.clone(),
+                }
+            }
+            (InputState::SearchInput { direction }, KeyCode::Down, _) => {
+                if self.search_history.is_empty() {
+                    return InputAction::NoAction;
+                }
+
+                match self.history_cursor {
+                    None => InputAction::NoAction,
+                    Some(idx) if idx + 1 < self.search_history.len() => {
+                        let next_index = idx + 1;
+                        self.history_cursor = Some(next_index);
+                        if let Some(entry) = self.search_history.get(next_index) {
+                            self.search_buffer = entry.clone();
+                        }
+                        InputAction::UpdateSearchBuffer {
+                            direction,
+                            buffer: self.search_buffer.clone(),
+                        }
+                    }
+                    Some(_) => {
+                        self.history_cursor = None;
+                        self.search_buffer.clear();
+                        InputAction::UpdateSearchBuffer {
+                            direction,
+                            buffer: self.search_buffer.clone(),
+                        }
+                    }
+                }
             }
             (InputState::Command, KeyCode::Esc, _)
             | (InputState::Command, KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -343,6 +407,20 @@ impl InputStateMachine {
 
     pub fn get_state(&self) -> InputState {
         self.state
+    }
+
+    fn record_history(&mut self, pattern: &str) {
+        if pattern.is_empty() {
+            return;
+        }
+        if self
+            .search_history
+            .last()
+            .is_some_and(|last| last == pattern)
+        {
+            return;
+        }
+        self.search_history.push(pattern.to_string());
     }
 }
 
@@ -639,6 +717,83 @@ mod tests {
         assert_eq!(
             service.process_event(key(KeyCode::Esc)),
             vec![InputAction::CancelPercentInput]
+        );
+    }
+
+    #[test]
+    fn search_history_navigation_allows_recall() {
+        let mut service = InputService::new();
+
+        // First search: "/f"
+        service.process_event(key(KeyCode::Char('/')));
+        service.process_event(key(KeyCode::Char('f')));
+        service.process_event(key(KeyCode::Enter));
+
+        // Second search: "/bar"
+        service.process_event(key(KeyCode::Char('/')));
+        service.process_event(key(KeyCode::Char('b')));
+        service.process_event(key(KeyCode::Char('a')));
+        service.process_event(key(KeyCode::Char('r')));
+        service.process_event(key(KeyCode::Enter));
+
+        // Start a new search session to recall history
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('/'))),
+            vec![InputAction::StartSearch(SearchDirection::Forward)]
+        );
+
+        // Up -> recalls most recent entry "bar"
+        assert_eq!(
+            service.process_event(key(KeyCode::Up)),
+            vec![InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "bar".to_string(),
+            }]
+        );
+
+        // Another Up -> older entry "f"
+        assert_eq!(
+            service.process_event(key(KeyCode::Up)),
+            vec![InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "f".to_string(),
+            }]
+        );
+
+        // Down -> returns to "bar"
+        assert_eq!(
+            service.process_event(key(KeyCode::Down)),
+            vec![InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "bar".to_string(),
+            }]
+        );
+
+        // Down past latest entry -> clears buffer
+        assert_eq!(
+            service.process_event(key(KeyCode::Down)),
+            vec![InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: String::new(),
+            }]
+        );
+
+        // Typing after recall resets the cursor
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('z'))),
+            vec![InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "z".to_string(),
+            }]
+        );
+
+        // Up again recalls the latest history entry
+        assert_eq!(
+            service.process_event(key(KeyCode::Up)),
+            vec![InputAction::UpdateSearchBuffer {
+                direction: SearchDirection::Forward,
+                buffer: "bar".to_string(),
+            }]
         );
     }
 
