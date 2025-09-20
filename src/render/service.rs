@@ -246,6 +246,16 @@ impl RenderLoopState {
                 if trimmed.is_empty() {
                     view_state.status_line.clear_search_prompt();
                     view_state.status_line.message = None;
+                    self.clear_search();
+                    pending_search_state.take();
+                    self.request_viewport(
+                        ViewportRequest::Absolute(view_state.viewport_top_byte),
+                        view_state,
+                        search_tx,
+                        next_request_id,
+                        latest_view_request,
+                    )
+                    .await?;
                     return Ok(true);
                 }
 

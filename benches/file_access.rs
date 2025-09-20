@@ -1,163 +1,174 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use flate2::{write::GzEncoder, Compression};
 use rlless::file_handler::{FileAccessor, FileAccessorFactory};
-use std::io::Write;
+use std::fmt::Write as _;
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 use tokio::runtime::Runtime;
 
-fn create_test_file(size_kb: usize) -> NamedTempFile {
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    let target_size = size_kb * 1024;
-    let mut current_size = 0;
-    let mut line_num = 0;
+const KB: usize = 1024;
+const MB: usize = 1024 * KB;
 
-    while current_size < target_size {
-        let log_line = format!(
-            "[2024-09-02T10:{}:{}] INFO: Request {} user_{}\n",
-            (line_num / 3600) % 24,
-            (line_num / 60) % 60,
-            line_num,
-            line_num % 1000
-        );
-        temp_file.write_all(log_line.as_bytes()).unwrap();
-        current_size += log_line.len();
-        line_num += 1;
-    }
-
-    temp_file.flush().unwrap();
-    temp_file
+#[derive(Clone, Copy)]
+enum FixtureKind {
+    Plain,
+    Gzip,
 }
 
-fn create_compressed_test_file(size_kb: usize) -> NamedTempFile {
-    let target_size = size_kb * 1024;
-    let mut content = Vec::new();
-    let mut current_size = 0;
-    let mut line_num = 0;
+fn write_fixture(mut sink: impl Write, target_bytes: usize) -> usize {
+    let mut written = 0usize;
+    let mut line_num = 0u64;
 
-    while current_size < target_size {
-        let log_line = format!(
-            "[2024-09-02T10:{}:{}] INFO: Request {} user_{}\n",
-            (line_num / 3600) % 24,
-            (line_num / 60) % 60,
+    while written < target_bytes {
+        let timestamp_min = (line_num / 60) % 60;
+        let timestamp_sec = line_num % 60;
+        let mut line = String::with_capacity(120);
+        let _ = writeln!(
+            line,
+            "2024-01-01T10:{:02}:{:02}.{:03} [Thread-{:02}] [INFO ] api        - request {:06} user_{:04}",
+            timestamp_min,
+            timestamp_sec,
+            line_num % 1000,
+            (line_num % 16) + 1,
             line_num,
-            line_num % 1000
+            line_num % 10000
         );
-        content.extend_from_slice(log_line.as_bytes());
-        current_size += log_line.len();
+        sink.write_all(line.as_bytes()).unwrap();
+        written += line.len();
         line_num += 1;
     }
 
-    let compressed_file = NamedTempFile::new().unwrap();
-    let file = std::fs::File::create(compressed_file.path()).unwrap();
-    let mut encoder = GzEncoder::new(file, Compression::default());
-    encoder.write_all(&content).unwrap();
-    encoder.finish().unwrap();
-    compressed_file
+    written
+}
+
+fn create_fixture(size_bytes: usize, kind: FixtureKind) -> NamedTempFile {
+    let temp = NamedTempFile::new().expect("failed to create temp file");
+    match kind {
+        FixtureKind::Plain => {
+            let file = std::fs::File::create(temp.path()).unwrap();
+            let mut writer = BufWriter::new(file);
+            write_fixture(&mut writer, size_bytes);
+            writer.flush().unwrap();
+        }
+        FixtureKind::Gzip => {
+            let file = std::fs::File::create(temp.path()).unwrap();
+            let mut encoder = GzEncoder::new(file, Compression::new(5));
+            write_fixture(&mut encoder, size_bytes);
+            encoder.finish().unwrap();
+        }
+    }
+    temp
+}
+
+fn size_label(bytes: usize) -> String {
+    if bytes >= MB {
+        format!("{}MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{}KB", bytes / KB)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+fn runtime() -> Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
 }
 
 fn bench_file_opening(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
+    let rt = runtime();
     let mut group = c.benchmark_group("file_opening");
     group.sample_size(10);
-    group.measurement_time(std::time::Duration::from_secs(5));
+    group.measurement_time(std::time::Duration::from_secs(4));
 
-    // Include larger files to test mmap accessor (>50MB threshold on macOS, >10MB on other platforms)
-    let sizes_kb = [50, 500, 5000, 20000, 60000]; // 50KB, 500KB, 5MB, 20MB, 60MB
+    let sizes = [512 * KB, 8 * MB, 64 * MB];
 
-    for &size_kb in &sizes_kb {
-        let temp_file = create_test_file(size_kb);
-        let size_label = if size_kb < 1024 {
-            format!("{}KB", size_kb)
-        } else {
-            format!("{}MB", size_kb / 1024)
-        };
+    let fixtures_plain: Vec<(String, NamedTempFile)> = sizes
+        .iter()
+        .map(|&size| (size_label(size), create_fixture(size, FixtureKind::Plain)))
+        .collect();
 
-        group.bench_with_input(
-            BenchmarkId::new("uncompressed", &size_label),
-            &temp_file.path(),
-            |b, path| {
-                b.iter(|| {
-                    let accessor =
-                        rt.block_on(async { FileAccessorFactory::create(path).await.unwrap() });
-                    black_box(accessor.file_size());
-                });
-            },
-        );
+    let fixtures_gzip: Vec<(String, NamedTempFile)> = sizes
+        .iter()
+        .map(|&size| (size_label(size), create_fixture(size, FixtureKind::Gzip)))
+        .collect();
 
-        let compressed_file = create_compressed_test_file(size_kb);
-        group.bench_with_input(
-            BenchmarkId::new("compressed", &size_label),
-            &compressed_file.path(),
-            |b, path| {
-                b.iter(|| {
-                    let accessor =
-                        rt.block_on(async { FileAccessorFactory::create(path).await.unwrap() });
-                    black_box(accessor.file_size());
-                });
-            },
-        );
+    for (label, fixture) in &fixtures_plain {
+        let path = fixture.path().to_path_buf();
+        group.bench_with_input(BenchmarkId::new("plain", label), &path, |b, p| {
+            b.iter(|| {
+                let accessor = rt.block_on(async { FileAccessorFactory::create(p).await.unwrap() });
+                black_box(accessor.file_size());
+            });
+        });
+    }
+
+    for (label, fixture) in &fixtures_gzip {
+        let path = fixture.path().to_path_buf();
+        group.bench_with_input(BenchmarkId::new("gzip", label), &path, |b, p| {
+            b.iter(|| {
+                let accessor = rt.block_on(async { FileAccessorFactory::create(p).await.unwrap() });
+                black_box(accessor.file_size());
+            });
+        });
     }
 
     group.finish();
 }
 
 fn bench_line_access(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
+    let rt = runtime();
     let mut group = c.benchmark_group("line_access");
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(3));
 
-    // Test both InMemory and Mmap accessors
-    let sizes_kb = [500, 20000, 60000]; // 500KB (InMemory), 20MB (InMemory on macOS), 60MB (Mmap)
+    let sizes = [2 * MB, 64 * MB];
 
-    for &size_kb in &sizes_kb {
-        let temp_file = create_test_file(size_kb);
-        let accessor =
-            rt.block_on(async { FileAccessorFactory::create(temp_file.path()).await.unwrap() });
+    let plain_accessors: Vec<(String, Arc<dyn FileAccessor>)> = sizes
+        .iter()
+        .map(|&size| {
+            let fixture = create_fixture(size, FixtureKind::Plain);
+            let accessor =
+                rt.block_on(async { FileAccessorFactory::create(fixture.path()).await.unwrap() });
+            (
+                size_label(size),
+                Arc::new(accessor) as Arc<dyn FileAccessor>,
+            )
+        })
+        .collect();
 
-        let size_label = if size_kb < 1024 {
-            format!("{}KB", size_kb)
-        } else {
-            format!("{}MB", size_kb / 1024)
-        };
-
-        let arc_accessor = Arc::new(accessor) as Arc<dyn FileAccessor>;
-        group.bench_with_input(
-            BenchmarkId::new("uncompressed", &size_label),
-            &arc_accessor,
-            |b, acc| {
-                b.iter(|| {
-                    let lines = rt.block_on(async { acc.read_from_byte(0, 1).await.unwrap() });
-                    black_box(lines);
-                });
-            },
-        );
-
-        let compressed_file = create_compressed_test_file(size_kb);
-        let compressed_accessor = rt.block_on(async {
-            FileAccessorFactory::create(compressed_file.path())
-                .await
-                .unwrap()
+    for (label, accessor) in &plain_accessors {
+        group.bench_with_input(BenchmarkId::new("plain", label), accessor, |b, acc| {
+            b.iter(|| {
+                let lines = rt.block_on(async { acc.read_from_byte(0, 64).await.unwrap() });
+                black_box(lines);
+            });
         });
+    }
 
-        let compressed_size_label = if size_kb < 1024 {
-            format!("{}KB", size_kb)
-        } else {
-            format!("{}MB", size_kb / 1024)
-        };
+    let gzip_accessors: Vec<(String, Arc<dyn FileAccessor>)> = sizes
+        .iter()
+        .map(|&size| {
+            let fixture = create_fixture(size, FixtureKind::Gzip);
+            let accessor =
+                rt.block_on(async { FileAccessorFactory::create(fixture.path()).await.unwrap() });
+            (
+                size_label(size),
+                Arc::new(accessor) as Arc<dyn FileAccessor>,
+            )
+        })
+        .collect();
 
-        let compressed_arc_accessor = Arc::new(compressed_accessor) as Arc<dyn FileAccessor>;
-        group.bench_with_input(
-            BenchmarkId::new("compressed", &compressed_size_label),
-            &compressed_arc_accessor,
-            |b, acc| {
-                b.iter(|| {
-                    let lines = rt.block_on(async { acc.read_from_byte(0, 1).await.unwrap() });
-                    black_box(lines);
-                });
-            },
-        );
+    for (label, accessor) in &gzip_accessors {
+        group.bench_with_input(BenchmarkId::new("gzip", label), accessor, |b, acc| {
+            b.iter(|| {
+                let lines = rt.block_on(async { acc.read_from_byte(0, 64).await.unwrap() });
+                black_box(lines);
+            });
+        });
     }
 
     group.finish();
