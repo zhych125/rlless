@@ -37,6 +37,9 @@ struct WorkerState {
     search_engine: RipgrepEngine,
     context: Option<SearchContext>,
     last_highlight: Option<Arc<SearchHighlightSpec>>,
+    // Cache of `(page_lines, start_byte)` for the last viewport to avoid redundant
+    // `last_page_start` computations while the viewport height stays constant.
+    last_page_start: Option<(usize, u64)>,
 }
 
 impl WorkerState {
@@ -46,6 +49,7 @@ impl WorkerState {
             search_engine,
             context: None,
             last_highlight: None,
+            last_page_start: None,
         }
     }
 
@@ -257,11 +261,19 @@ impl WorkerState {
     }
 
     async fn resolve_viewport_target(
-        &self,
+        &mut self,
         top: ViewportRequest,
         page_lines: usize,
     ) -> Result<u64> {
-        let target_byte = match top {
+        let file_size = self.file_accessor.file_size();
+
+        if file_size == 0 {
+            return Ok(0);
+        }
+
+        let last_start = self.compute_last_page_start(page_lines, file_size).await?;
+
+        let mut target_byte = match top {
             ViewportRequest::Absolute(byte) => byte,
             ViewportRequest::RelativeLines { anchor, lines } => {
                 if lines == 0 {
@@ -276,9 +288,36 @@ impl WorkerState {
                         .await?
                 }
             }
-            ViewportRequest::EndOfFile => self.file_accessor.last_page_start(page_lines).await?,
+            ViewportRequest::EndOfFile => last_start.unwrap_or(0),
         };
+
+        if let Some(last) = last_start {
+            if target_byte > last {
+                target_byte = last;
+            }
+        }
+
         Ok(target_byte)
+    }
+
+    async fn compute_last_page_start(
+        &mut self,
+        page_lines: usize,
+        file_size: u64,
+    ) -> Result<Option<u64>> {
+        if file_size == 0 {
+            self.last_page_start = None;
+            return Ok(None);
+        }
+
+        match self.last_page_start {
+            Some((cached_lines, pos)) if cached_lines == page_lines => Ok(Some(pos)),
+            _ => {
+                let last = self.file_accessor.last_page_start(page_lines).await?;
+                self.last_page_start = Some((page_lines, last));
+                Ok(Some(last))
+            }
+        }
     }
 
     fn compute_highlights(
@@ -371,6 +410,89 @@ impl HandlerOutcome {
         Self {
             response: None,
             done: true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_handler::accessor::FileAccessor;
+    use async_trait::async_trait;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug, Clone)]
+    struct EmptyAccessor {
+        path: PathBuf,
+    }
+
+    impl Default for EmptyAccessor {
+        fn default() -> Self {
+            Self {
+                path: PathBuf::from("<empty>"),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FileAccessor for EmptyAccessor {
+        async fn read_from_byte(&self, _start_byte: u64, _max_lines: usize) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn find_next_match(
+            &self,
+            _start_byte: u64,
+            _search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+        ) -> Result<Option<u64>> {
+            Ok(None)
+        }
+
+        async fn find_prev_match(
+            &self,
+            _start_byte: u64,
+            _search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+        ) -> Result<Option<u64>> {
+            Ok(None)
+        }
+
+        fn file_size(&self) -> u64 {
+            0
+        }
+
+        fn file_path(&self) -> &Path {
+            &self.path
+        }
+
+        async fn last_page_start(&self, _max_lines: usize) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn next_page_start(&self, _current_byte: u64, _lines_to_skip: usize) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn prev_page_start(&self, _current_byte: u64, _lines_to_skip: usize) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_files_resolve_to_zero() {
+        let accessor: Arc<dyn FileAccessor> = Arc::new(EmptyAccessor::default());
+        let engine = RipgrepEngine::new(Arc::clone(&accessor));
+        let mut worker = WorkerState::new(accessor, engine);
+
+        for request in [
+            ViewportRequest::Absolute(10),
+            ViewportRequest::RelativeLines {
+                anchor: 25,
+                lines: 3,
+            },
+            ViewportRequest::EndOfFile,
+        ] {
+            let resolved = worker.resolve_viewport_target(request, 5).await.unwrap();
+            assert_eq!(resolved, 0);
         }
     }
 }

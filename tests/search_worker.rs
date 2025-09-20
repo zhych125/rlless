@@ -99,6 +99,73 @@ async fn load_viewport_marks_eof_when_past_file_end() {
 }
 
 #[tokio::test]
+async fn relative_scroll_stops_at_last_page() {
+    let contents = "line1\nline2\nline3\nline4\nline5\n";
+    let (cmd_tx, mut resp_rx, worker) = spawn_worker(contents).await;
+
+    cmd_tx
+        .send(SearchCommand::LoadViewport {
+            request_id: 1,
+            top: ViewportRequest::Absolute(0),
+            page_lines: 2,
+            highlights: None,
+        })
+        .await
+        .unwrap();
+
+    let first_top = match next_response(&mut resp_rx).await {
+        SearchResponse::ViewportLoaded { top_byte, .. } => top_byte,
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    cmd_tx
+        .send(SearchCommand::LoadViewport {
+            request_id: 2,
+            top: ViewportRequest::RelativeLines {
+                anchor: first_top,
+                lines: 10,
+            },
+            page_lines: 2,
+            highlights: None,
+        })
+        .await
+        .unwrap();
+
+    let second_top = match next_response(&mut resp_rx).await {
+        SearchResponse::ViewportLoaded {
+            top_byte, lines, ..
+        } => {
+            assert_eq!(lines.last().map(String::as_str), Some("line5"));
+            top_byte
+        }
+        other => panic!("unexpected response: {other:?}"),
+    };
+
+    cmd_tx
+        .send(SearchCommand::LoadViewport {
+            request_id: 3,
+            top: ViewportRequest::RelativeLines {
+                anchor: second_top,
+                lines: 1,
+            },
+            page_lines: 2,
+            highlights: None,
+        })
+        .await
+        .unwrap();
+
+    match next_response(&mut resp_rx).await {
+        SearchResponse::ViewportLoaded { top_byte, .. } => {
+            assert_eq!(top_byte, second_top);
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    cmd_tx.send(SearchCommand::Shutdown).await.unwrap();
+    worker.await.unwrap();
+}
+
+#[tokio::test]
 async fn execute_search_followed_by_viewport_load() {
     let contents = "alpha\nbeta\ngamma\nbeta again\n";
     let (cmd_tx, mut resp_rx, worker) = spawn_worker(contents).await;

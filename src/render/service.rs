@@ -321,6 +321,66 @@ impl RenderLoopState {
                 }
                 Ok(true)
             }
+            InputAction::StartPercentInput => {
+                view_state.status_line.set_message("goto: %".to_string());
+                Ok(true)
+            }
+            InputAction::UpdatePercentBuffer(buffer) => {
+                let display = if buffer.is_empty() {
+                    "goto: %".to_string()
+                } else {
+                    format!("goto: %{}", buffer)
+                };
+                view_state.status_line.set_message(display);
+                Ok(true)
+            }
+            InputAction::CancelPercentInput => {
+                view_state.status_line.clear_message();
+                Ok(true)
+            }
+            InputAction::SubmitPercent(percent) => {
+                let Some(file_size) = view_state.file_size else {
+                    view_state
+                        .status_line
+                        .set_message("Cannot jump: file size unknown".to_string());
+                    return Ok(true);
+                };
+
+                if file_size == 0 {
+                    view_state
+                        .status_line
+                        .set_message("Cannot jump: file is empty".to_string());
+                    return Ok(true);
+                }
+
+                if percent >= 100 {
+                    view_state
+                        .status_line
+                        .set_message("goto: 100% (EOF)".to_string());
+                    return self
+                        .queue_viewport_update(
+                            ViewportRequest::EndOfFile,
+                            view_state,
+                            search_tx,
+                            next_request_id,
+                            latest_view_request,
+                        )
+                        .await;
+                }
+
+                let target = ((percent as u128) * (file_size as u128) / 100) as u64;
+                view_state
+                    .status_line
+                    .set_message(format!("goto: {}%", percent));
+                self.queue_viewport_update(
+                    ViewportRequest::Absolute(target),
+                    view_state,
+                    search_tx,
+                    next_request_id,
+                    latest_view_request,
+                )
+                .await
+            }
             InputAction::StartCommand => {
                 view_state.status_line.set_message("command: -".to_string());
                 Ok(true)
@@ -659,6 +719,28 @@ mod state_tests {
                 direction: ScrollDirection::Up,
                 lines: 1,
             }
+        );
+    }
+
+    #[test]
+    fn percent_jump_requires_digits() {
+        let mut sm = InputStateMachine::new();
+        assert_eq!(
+            sm.handle_key_event(key(KeyCode::Char('%'))),
+            InputAction::StartPercentInput
+        );
+
+        assert_eq!(
+            sm.handle_key_event(key(KeyCode::Char('1'))),
+            InputAction::UpdatePercentBuffer("1".to_string())
+        );
+        assert_eq!(
+            sm.handle_key_event(key(KeyCode::Char('0'))),
+            InputAction::UpdatePercentBuffer("10".to_string())
+        );
+        assert_eq!(
+            sm.handle_key_event(key(KeyCode::Enter)),
+            InputAction::SubmitPercent(10)
         );
     }
 }

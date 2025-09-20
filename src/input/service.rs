@@ -18,6 +18,7 @@ pub enum InputState {
     Navigation,
     SearchInput { direction: SearchDirection },
     Command,
+    PercentInput,
 }
 
 /// Direction for forward/backward search.
@@ -78,6 +79,10 @@ pub enum InputAction {
     ExecuteCommand {
         buffer: String,
     },
+    StartPercentInput,
+    UpdatePercentBuffer(String),
+    CancelPercentInput,
+    SubmitPercent(u8),
     NoAction,
     InvalidInput,
 }
@@ -87,6 +92,7 @@ pub struct InputStateMachine {
     state: InputState,
     search_buffer: String,
     command_buffer: String,
+    percent_buffer: String,
 }
 
 impl InputStateMachine {
@@ -95,7 +101,12 @@ impl InputStateMachine {
             state: InputState::Navigation,
             search_buffer: String::new(),
             command_buffer: String::new(),
+            percent_buffer: String::new(),
         }
+    }
+
+    fn clear_percent_buffer(&mut self) {
+        self.percent_buffer.clear();
     }
 
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputAction {
@@ -104,6 +115,13 @@ impl InputStateMachine {
         }
 
         match (self.state, key_event.code, key_event.modifiers) {
+            (InputState::Navigation, KeyCode::Char('%'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.state = InputState::PercentInput;
+                self.clear_percent_buffer();
+                InputAction::StartPercentInput
+            }
             (InputState::Navigation, KeyCode::Char('j'), modifiers)
                 if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
@@ -269,7 +287,53 @@ impl InputStateMachine {
                 InputAction::UpdateCommandBuffer(self.command_buffer.clone())
             }
             (InputState::Command, _, _) => InputAction::InvalidInput,
-            _ => InputAction::InvalidInput,
+            (InputState::PercentInput, KeyCode::Char(ch @ '0'..='9'), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if self.percent_buffer.len() < 3 {
+                    self.percent_buffer.push(ch);
+                }
+                InputAction::UpdatePercentBuffer(self.percent_buffer.clone())
+            }
+            (InputState::PercentInput, KeyCode::Backspace, _) => {
+                if self.percent_buffer.pop().is_some() {
+                    InputAction::UpdatePercentBuffer(self.percent_buffer.clone())
+                } else {
+                    self.state = InputState::Navigation;
+                    InputAction::CancelPercentInput
+                }
+            }
+            (InputState::PercentInput, KeyCode::Enter, _) => {
+                let buffer = self.percent_buffer.clone();
+                self.clear_percent_buffer();
+                self.state = InputState::Navigation;
+
+                if buffer.is_empty() {
+                    return InputAction::CancelPercentInput;
+                }
+
+                match buffer.parse::<u16>() {
+                    Ok(value) => InputAction::SubmitPercent(value.min(100) as u8),
+                    Err(_) => InputAction::InvalidInput,
+                }
+            }
+            (InputState::PercentInput, KeyCode::Esc, _) => {
+                self.clear_percent_buffer();
+                self.state = InputState::Navigation;
+                InputAction::CancelPercentInput
+            }
+            (InputState::PercentInput, KeyCode::Char('c'), modifiers)
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.clear_percent_buffer();
+                self.state = InputState::Navigation;
+                InputAction::CancelPercentInput
+            }
+            (InputState::PercentInput, _, _) => InputAction::InvalidInput,
+            _ => {
+                self.clear_percent_buffer();
+                InputAction::InvalidInput
+            }
         }
     }
 
@@ -486,6 +550,95 @@ mod tests {
                     lines: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn percent_jump_emits_action() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('%'))),
+            vec![InputAction::StartPercentInput]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('5'))),
+            vec![InputAction::UpdatePercentBuffer("5".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('0'))),
+            vec![InputAction::UpdatePercentBuffer("50".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Enter)),
+            vec![InputAction::SubmitPercent(50)]
+        );
+    }
+
+    #[test]
+    fn percent_jump_backspace_cancels_when_empty() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('%'))),
+            vec![InputAction::StartPercentInput]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('1'))),
+            vec![InputAction::UpdatePercentBuffer("1".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Backspace)),
+            vec![InputAction::UpdatePercentBuffer(String::new())]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Backspace)),
+            vec![InputAction::CancelPercentInput]
+        );
+    }
+
+    fn ctrl_char(ch: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn percent_jump_ctrl_c_cancels() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('%'))),
+            vec![InputAction::StartPercentInput]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('2'))),
+            vec![InputAction::UpdatePercentBuffer("2".to_string())]
+        );
+
+        assert_eq!(
+            service.process_event(ctrl_char('c')),
+            vec![InputAction::CancelPercentInput]
+        );
+    }
+
+    #[test]
+    fn percent_jump_escape_cancels() {
+        let mut service = InputService::new();
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Char('%'))),
+            vec![InputAction::StartPercentInput]
+        );
+
+        assert_eq!(
+            service.process_event(key(KeyCode::Esc)),
+            vec![InputAction::CancelPercentInput]
         );
     }
 

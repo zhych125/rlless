@@ -29,7 +29,7 @@
    - Integration tests covering CLI + runtime toggles.
 
 ### Milestone 2: Jump to Percentage Navigation
-1. **Input parsing**: add numeric buffer in the state machine able to capture prefix digits followed by `%` to emit a new `InputAction::JumpToPercent(u8)`.
+1. **Input parsing**: introduce a `%`-triggered "goto" input mode that mirrors command/search prompts (enter to confirm, esc/backspace to edit) and emits structured actions for start/update/submit.
 2. **Render handling**: implement coordinate logic in `RenderLoopState::process_action` to convert percentage to byte position (requires file size; fallback to current state if unknown).
 3. **Search worker**: already able to load absolute viewports; ensure the jump handles rounding and clamps to file bounds.
 4. **Tests**: unit tests for input state machine, integration test to verify `LoadViewport` request hits expected byte.
