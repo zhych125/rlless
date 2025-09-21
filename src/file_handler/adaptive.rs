@@ -3,11 +3,12 @@
 //! This module provides a single implementation that adapts its internal strategy
 //! based on file characteristics determined by the FileAccessorFactory.
 
-use crate::error::Result;
+use crate::error::{Result, RllessError};
 use crate::file_handler::accessor::FileAccessor;
 use async_trait::async_trait;
 use memmap2::Mmap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 
 /// Internal byte source strategy for AdaptiveFileAccessor
@@ -117,6 +118,7 @@ impl FileAccessor for AdaptiveFileAccessor {
         &self,
         start_byte: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>> {
         let bytes = self.source.as_bytes();
         if start_byte as usize >= bytes.len() {
@@ -126,6 +128,12 @@ impl FileAccessor for AdaptiveFileAccessor {
         let mut current_pos = start_byte as usize;
 
         while current_pos < bytes.len() {
+            if cancel_flag
+                .map(|flag| flag.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                return Err(RllessError::cancelled());
+            }
             // Find the end of the current line
             let line_end = memchr::memchr(b'\n', &bytes[current_pos..])
                 .map(|pos| current_pos + pos)
@@ -155,6 +163,7 @@ impl FileAccessor for AdaptiveFileAccessor {
         &self,
         start_byte: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>> {
         let bytes = self.source.as_bytes();
         if start_byte == 0 {
@@ -166,6 +175,12 @@ impl FileAccessor for AdaptiveFileAccessor {
 
         // Search backward line by line
         loop {
+            if cancel_flag
+                .map(|flag| flag.load(Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                return Err(RllessError::cancelled());
+            }
             // Find the start of the line containing search_pos
             let line_start = if search_pos == 0 {
                 0
@@ -362,18 +377,27 @@ mod tests {
         };
 
         // Find first match
-        let result = accessor.find_next_match(0, &error_search).await.unwrap();
+        let result = accessor
+            .find_next_match(0, &error_search, None)
+            .await
+            .unwrap();
         assert_eq!(result, Some(0));
 
         // Find second match
-        let result = accessor.find_next_match(15, &error_search).await.unwrap();
+        let result = accessor
+            .find_next_match(15, &error_search, None)
+            .await
+            .unwrap();
         assert!(result.is_some());
         let byte_pos = result.unwrap();
         assert!(byte_pos > 15);
 
         // No match found
         let no_match_search = |_line: &str| Vec::new();
-        let result = accessor.find_next_match(0, &no_match_search).await.unwrap();
+        let result = accessor
+            .find_next_match(0, &no_match_search, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -396,11 +420,17 @@ mod tests {
         };
 
         // Find match searching backward from end
-        let result = accessor.find_prev_match(100, &error_search).await.unwrap();
+        let result = accessor
+            .find_prev_match(100, &error_search, None)
+            .await
+            .unwrap();
         assert!(result.is_some());
 
         // No match from beginning
-        let result = accessor.find_prev_match(0, &error_search).await.unwrap();
+        let result = accessor
+            .find_prev_match(0, &error_search, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 

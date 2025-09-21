@@ -11,6 +11,7 @@ use crate::render::protocol::{
 };
 use crate::render::ui::ViewState;
 use crate::search::SearchOptions;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio::time::{self, Duration};
@@ -126,15 +127,19 @@ impl RenderLoopState {
         search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
         latest_search_request: &mut Option<RequestId>,
+        search_cancel_flag: &mut Option<Arc<AtomicBool>>,
     ) -> Result<bool> {
         let request_id = *next_request_id;
         *next_request_id += 1;
         *latest_search_request = Some(request_id);
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        *search_cancel_flag = Some(Arc::clone(&cancel_flag));
         search_tx
             .send(SearchCommand::NavigateMatch {
                 request_id,
                 traversal,
                 current_top: view_state.viewport_top_byte,
+                cancel_flag,
             })
             .await
             .map_err(|_| RllessError::other("search worker unavailable"))?;
@@ -150,9 +155,25 @@ impl RenderLoopState {
         next_request_id: &mut RequestId,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
+        search_cancel_flag: &mut Option<Arc<AtomicBool>>,
         pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
     ) -> Result<bool> {
         match action {
+            InputAction::Interrupt => {
+                if latest_search_request.is_some() {
+                    if let Some(flag) = search_cancel_flag {
+                        // Flip the token that travels with the in-flight command; the worker
+                        // checks it cooperatively so we do not rely on inserting a follow-up
+                        // cancel command into the queue.
+                        flag.store(true, Ordering::SeqCst);
+                        view_state
+                            .status_line
+                            .set_message("Cancelling search…".to_string());
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
             InputAction::Quit => Ok(false),
             InputAction::Scroll { direction, lines } => {
                 let delta = match direction {
@@ -232,6 +253,7 @@ impl RenderLoopState {
                 view_state.status_line.message = None;
                 pending_search_state.take();
                 *latest_search_request = None;
+                search_cancel_flag.take();
                 self.request_viewport(
                     ViewportRequest::Absolute(view_state.viewport_top_byte),
                     view_state,
@@ -248,6 +270,7 @@ impl RenderLoopState {
                     view_state.status_line.clear_search_prompt();
                     view_state.status_line.message = None;
                     pending_search_state.take();
+                    search_cancel_flag.take();
                     let _ = search_tx.send(SearchCommand::ClearSearchContext).await;
                     self.clear_search(view_state);
                     self.request_viewport(
@@ -271,6 +294,8 @@ impl RenderLoopState {
                     options: options.clone(),
                 });
                 pending_search_state.replace((request_id, Arc::clone(&highlight)));
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                *search_cancel_flag = Some(Arc::clone(&cancel_flag));
 
                 search_tx
                     .send(SearchCommand::ExecuteSearch {
@@ -279,6 +304,7 @@ impl RenderLoopState {
                         direction,
                         options,
                         origin_byte: view_state.viewport_top_byte,
+                        cancel_flag,
                     })
                     .await
                     .map_err(|_| RllessError::other("search worker unavailable"))?;
@@ -299,6 +325,7 @@ impl RenderLoopState {
                     search_tx,
                     next_request_id,
                     latest_search_request,
+                    search_cancel_flag,
                 )
                 .await
             }
@@ -317,6 +344,7 @@ impl RenderLoopState {
                     search_tx,
                     next_request_id,
                     latest_search_request,
+                    search_cancel_flag,
                 )
                 .await
             }
@@ -482,6 +510,7 @@ impl RenderLoopState {
         view_state: &mut ViewState,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
+        search_cancel_flag: &mut Option<Arc<AtomicBool>>,
         pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
         search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
@@ -513,6 +542,7 @@ impl RenderLoopState {
                     return Ok(());
                 }
                 *latest_search_request = None;
+                search_cancel_flag.take();
 
                 if let Some(msg) = message {
                     // Worker signals errors/not-found via `message`; treat this as a failed search
@@ -549,6 +579,19 @@ impl RenderLoopState {
                     *latest_view_request = Some(request_id);
                 }
             }
+            SearchResponse::SearchCancelled { request_id } => {
+                if Some(request_id) != *latest_search_request {
+                    return Ok(());
+                }
+                *latest_search_request = None;
+                search_cancel_flag.take();
+                pending_search_state.take();
+                let _ = search_tx.send(SearchCommand::ClearSearchContext).await;
+                view_state.status_line.clear_search_prompt();
+                view_state
+                    .status_line
+                    .set_message("Search cancelled".to_string());
+            }
             SearchResponse::Error { request_id, error } => {
                 if Some(request_id) == *latest_view_request {
                     *latest_view_request = None;
@@ -557,6 +600,7 @@ impl RenderLoopState {
                     *latest_search_request = None;
                     pending_search_state.take();
                 }
+                search_cancel_flag.take();
                 view_state
                     .status_line
                     .set_message(format!("Operation failed: {}", error));
@@ -602,6 +646,7 @@ impl RenderCoordinator {
         next_request_id: &mut RequestId,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
+        search_cancel_flag: &mut Option<Arc<AtomicBool>>,
         pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
     ) -> Result<bool> {
         for action in actions.drain(..) {
@@ -613,6 +658,7 @@ impl RenderCoordinator {
                     next_request_id,
                     latest_view_request,
                     latest_search_request,
+                    search_cancel_flag,
                     pending_search_state,
                 )
                 .await?
@@ -630,6 +676,7 @@ impl RenderCoordinator {
         search_resp_rx: &mut tokio::sync::mpsc::Receiver<SearchResponse>,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
+        search_cancel_flag: &mut Option<Arc<AtomicBool>>,
         pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
         search_tx: &mut Sender<SearchCommand>,
         next_request_id: &mut RequestId,
@@ -641,6 +688,7 @@ impl RenderCoordinator {
                     view_state,
                     latest_view_request,
                     latest_search_request,
+                    search_cancel_flag,
                     pending_search_state,
                     search_tx,
                     next_request_id,
@@ -661,6 +709,7 @@ impl RenderCoordinator {
         next_request_id: &mut RequestId,
         latest_view_request: &mut Option<RequestId>,
         latest_search_request: &mut Option<RequestId>,
+        search_cancel_flag: &mut Option<Arc<AtomicBool>>,
         pending_search_state: &mut Option<(RequestId, Arc<SearchHighlightSpec>)>,
     ) -> Result<()> {
         let mut interval = time::interval(Duration::from_millis(16));
@@ -683,6 +732,7 @@ impl RenderCoordinator {
                     next_request_id,
                     latest_view_request,
                     latest_search_request,
+                    search_cancel_flag,
                     pending_search_state,
                 )
                 .await?;
@@ -697,6 +747,7 @@ impl RenderCoordinator {
                 search_resp_rx,
                 latest_view_request,
                 latest_search_request,
+                search_cancel_flag,
                 pending_search_state,
                 search_tx,
                 next_request_id,

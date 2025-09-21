@@ -57,6 +57,8 @@ pub enum InputAction {
     GoToStart,
     GoToEnd,
     Quit,
+    /// User-requested interrupt (typically `Ctrl+C`).
+    Interrupt,
     StartSearch(SearchDirection),
     UpdateSearchBuffer {
         direction: SearchDirection,
@@ -190,7 +192,7 @@ impl InputStateMachine {
                 InputAction::Quit
             }
             (InputState::Navigation, KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                InputAction::Quit
+                InputAction::Interrupt
             }
             (InputState::Navigation, KeyCode::Char('n'), modifiers)
                 if !modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -717,6 +719,15 @@ mod tests {
         assert_eq!(
             service.process_event(key(KeyCode::Esc)),
             vec![InputAction::CancelPercentInput]
+        );
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_navigation() {
+        let mut service = InputService::new();
+        assert_eq!(
+            service.process_event(ctrl_char('c')),
+            vec![InputAction::Interrupt]
         );
     }
 

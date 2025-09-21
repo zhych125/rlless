@@ -72,6 +72,7 @@ impl Application {
         #[allow(unused_assignments)]
         let mut latest_view_request: Option<RequestId> = None;
         let mut latest_search_request: Option<RequestId> = None;
+        let mut search_cancel_flag: Option<Arc<AtomicBool>> = None;
         let mut pending_search_state: Option<(RequestId, Arc<SearchHighlightSpec>)> = None;
 
         // Prime the viewport with initial content
@@ -95,6 +96,7 @@ impl Application {
                     &mut view_state,
                     &mut latest_view_request,
                     &mut latest_search_request,
+                    &mut search_cancel_flag,
                     &mut pending_search_state,
                     &mut search_tx,
                     &mut next_request_id,
@@ -112,6 +114,7 @@ impl Application {
             &mut next_request_id,
             &mut latest_view_request,
             &mut latest_search_request,
+            &mut search_cancel_flag,
             &mut pending_search_state,
         )
         .await?;

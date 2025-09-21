@@ -3,6 +3,7 @@
 use crate::error::RllessError;
 use crate::input::SearchDirection;
 use crate::search::SearchOptions;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Identifier attached to cross-thread requests so responses can be correlated.
@@ -20,7 +21,7 @@ pub enum ViewportRequest {
 }
 
 /// Active search context used to compute highlights inside the viewport worker.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct SearchHighlightSpec {
     pub pattern: Arc<str>,
     pub options: SearchOptions,
@@ -44,7 +45,7 @@ pub struct SearchContext {
 }
 
 /// Commands sent from the render coordinator to the search/paging worker.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SearchCommand {
     LoadViewport {
         request_id: RequestId,
@@ -58,11 +59,16 @@ pub enum SearchCommand {
         direction: SearchDirection,
         options: SearchOptions,
         origin_byte: u64,
+        // Carry the cancellation flag with the work item so the worker can observe it while
+        // running; a standalone cancel command would queue behind the job we want to abort.
+        cancel_flag: Arc<AtomicBool>,
     },
     NavigateMatch {
         request_id: RequestId,
         traversal: MatchTraversal,
         current_top: u64,
+        // Same rationale as above: piggyback the token on the specific request.
+        cancel_flag: Arc<AtomicBool>,
     },
     UpdateSearchContext(SearchContext),
     ClearSearchContext,
@@ -84,6 +90,9 @@ pub enum SearchResponse {
         request_id: RequestId,
         match_byte: Option<u64>,
         message: Option<String>,
+    },
+    SearchCancelled {
+        request_id: RequestId,
     },
     Error {
         request_id: RequestId,

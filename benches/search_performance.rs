@@ -135,7 +135,7 @@ fn bench_search_patterns(c: &mut Criterion) {
                 let options = SearchOptions::default();
                 b.iter(|| {
                     let result =
-                        rt.block_on(async { eng.search_from("timeout", 0, &options).await });
+                        rt.block_on(async { eng.search_from("timeout", 0, &options, None).await });
                     let _ = black_box(result);
                 });
             },
@@ -152,7 +152,7 @@ fn bench_search_patterns(c: &mut Criterion) {
                 };
                 b.iter(|| {
                     let result = rt.block_on(async {
-                        eng.search_from(r"timeout|connection_failed", 0, &options)
+                        eng.search_from(r"timeout|connection_failed", 0, &options, None)
                             .await
                     });
                     let _ = black_box(result);
@@ -170,7 +170,8 @@ fn bench_search_patterns(c: &mut Criterion) {
                     ..Default::default()
                 };
                 b.iter(|| {
-                    let result = rt.block_on(async { eng.search_from("ERROR", 0, &options).await });
+                    let result =
+                        rt.block_on(async { eng.search_from("ERROR", 0, &options, None).await });
                     let _ = black_box(result);
                 });
             },
@@ -183,7 +184,8 @@ fn bench_search_patterns(c: &mut Criterion) {
                 ..Default::default()
             };
             b.iter(|| {
-                let result = rt.block_on(async { eng.search_from("auth", 0, &options).await });
+                let result =
+                    rt.block_on(async { eng.search_from("auth", 0, &options, None).await });
                 let _ = black_box(result);
             });
         });
@@ -214,7 +216,8 @@ fn bench_search_navigation(c: &mut Criterion) {
         let engine = Arc::clone(&engine);
         b.iter(|| {
             // Start from middle of file
-            let result = rt.block_on(async { engine.search_from("timeout", 1000, &options).await });
+            let result =
+                rt.block_on(async { engine.search_from("timeout", 1000, &options, None).await });
             let _ = black_box(result);
         });
     });
@@ -225,7 +228,8 @@ fn bench_search_navigation(c: &mut Criterion) {
         let engine = Arc::clone(&engine);
         b.iter(|| {
             // Start from near end of file
-            let result = rt.block_on(async { engine.search_prev("timeout", 2000, &options).await });
+            let result =
+                rt.block_on(async { engine.search_prev("timeout", 2000, &options, None).await });
             let _ = black_box(result);
         });
     });
@@ -237,8 +241,11 @@ fn bench_search_navigation(c: &mut Criterion) {
         };
         let engine = Arc::clone(&engine);
         b.iter(|| {
-            let result =
-                rt.block_on(async { engine.search_from("connection_failed", 0, &options).await });
+            let result = rt.block_on(async {
+                engine
+                    .search_from("connection_failed", 0, &options, None)
+                    .await
+            });
             let _ = black_box(result);
         });
     });
@@ -265,14 +272,15 @@ fn bench_search_caching(c: &mut Criterion) {
     // Warm up cache with first search
     let options = SearchOptions::default();
     rt.block_on(async {
-        let _ = engine.search_from("timeout", 0, &options).await;
+        let _ = engine.search_from("timeout", 0, &options, None).await;
     });
 
     // Test cache hit performance
     group.bench_function("cached_search", |b| {
         let engine = Arc::clone(&engine);
         b.iter(|| {
-            let result = rt.block_on(async { engine.search_from("timeout", 0, &options).await });
+            let result =
+                rt.block_on(async { engine.search_from("timeout", 0, &options, None).await });
             let _ = black_box(result);
         });
     });
@@ -284,7 +292,8 @@ fn bench_search_caching(c: &mut Criterion) {
         b.iter(|| {
             counter += 1;
             let pattern = format!("user_{}", counter % 1000);
-            let result = rt.block_on(async { engine.search_from(&pattern, 0, &options).await });
+            let result =
+                rt.block_on(async { engine.search_from(&pattern, 0, &options, None).await });
             let _ = black_box(result);
         });
     });
@@ -323,7 +332,7 @@ fn bench_complex_regex_patterns(c: &mut Criterion) {
                 };
                 b.iter(|| {
                     let result = rt.block_on(async {
-                        eng.search_from(r"IPv4: 192\.168\.1\.\d{1,3}", 0, &options)
+                        eng.search_from(r"IPv4: 192\.168\.1\.\d{1,3}", 0, &options, None)
                             .await
                     });
                     let _ = black_box(result);
@@ -346,6 +355,7 @@ fn bench_complex_regex_patterns(c: &mut Criterion) {
                             r"Memory usage at \d{2}\.\d%.*server-\d{3}.*PID: \d+",
                             0,
                             &options,
+                            None,
                         )
                         .await
                     });
@@ -369,6 +379,7 @@ fn bench_complex_regex_patterns(c: &mut Criterion) {
                             r#"\{"event":"user_action".*"user_id":"usr_[0-9a-f]{8}".*"timestamp":\d{10}"#,
                             0,
                             &options,
+                            None,
                         )
                         .await
                     });
@@ -388,8 +399,13 @@ fn bench_complex_regex_patterns(c: &mut Criterion) {
                 };
                 b.iter(|| {
                     let result = rt.block_on(async {
-                        eng.search_from(r"Session: sess_[0-9a-f]+.*Critical.*Memory", 0, &options)
-                            .await
+                        eng.search_from(
+                            r"Session: sess_[0-9a-f]+.*Critical.*Memory",
+                            0,
+                            &options,
+                            None,
+                        )
+                        .await
                     });
                     let _ = black_box(result);
                 });
@@ -411,6 +427,7 @@ fn bench_complex_regex_patterns(c: &mut Criterion) {
                             r"\[2024-09-02T10:[0-5]\d:[0-5]\d\].*auth.*usr_[0-9a-f]{8}.*timestamp",
                             0,
                             &options,
+                            None,
                         )
                         .await
                     });
@@ -456,8 +473,9 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 b.iter(|| {
                     // Generate random start byte position (avoid last 10% to ensure matches)
                     let start_byte = rng.gen_range(0..file_size.saturating_sub(file_size / 10));
-                    let result = rt
-                        .block_on(async { eng.search_from("timeout", start_byte, &options).await });
+                    let result = rt.block_on(async {
+                        eng.search_from("timeout", start_byte, &options, None).await
+                    });
                     let _ = black_box(result);
                 });
             },
@@ -480,6 +498,7 @@ fn bench_random_start_positions(c: &mut Criterion) {
                             r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",
                             start_byte,
                             &options,
+                            None,
                         )
                         .await
                     });
@@ -501,7 +520,7 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 b.iter(|| {
                     let start_byte = rng.gen_range(0..file_size.saturating_sub(file_size / 5));
                     let result = rt.block_on(async {
-                        eng.search_from(r"IPv4: 192\.168\.1\.\d{1,3}", start_byte, &options)
+                        eng.search_from(r"IPv4: 192\.168\.1\.\d{1,3}", start_byte, &options, None)
                             .await
                     });
                     let _ = black_box(result);
@@ -519,8 +538,9 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 b.iter(|| {
                     // For backward search, start from middle to end of file
                     let start_byte = rng.gen_range(file_size / 2..file_size);
-                    let result = rt
-                        .block_on(async { eng.search_prev("timeout", start_byte, &options).await });
+                    let result = rt.block_on(async {
+                        eng.search_prev("timeout", start_byte, &options, None).await
+                    });
                     let _ = black_box(result);
                 });
             },
@@ -537,8 +557,9 @@ fn bench_random_start_positions(c: &mut Criterion) {
                 let mut rng = ChaCha8Rng::seed_from_u64(46); // Different seed
                 b.iter(|| {
                     let start_byte = rng.gen_range(file_size / 4..3 * file_size / 4);
-                    let result =
-                        rt.block_on(async { eng.search_from("ERROR", start_byte, &options).await });
+                    let result = rt.block_on(async {
+                        eng.search_from("ERROR", start_byte, &options, None).await
+                    });
                     let _ = black_box(result);
                 });
             },

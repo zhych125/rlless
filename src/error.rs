@@ -63,6 +63,10 @@ pub enum RllessError {
     #[error("Invalid argument: {message}")]
     InvalidArgument { message: String },
 
+    /// Cooperative cancellation request
+    #[error("Operation cancelled")]
+    Cancelled,
+
     /// Generic error for cases not covered by specific variants
     #[error("Operation failed: {message}")]
     Other { message: String },
@@ -126,6 +130,11 @@ impl RllessError {
         Self::Other {
             message: message.into(),
         }
+    }
+
+    /// Create a cancellation error
+    pub fn cancelled() -> Self {
+        Self::Cancelled
     }
 }
 

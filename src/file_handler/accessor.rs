@@ -7,6 +7,7 @@
 use crate::error::Result;
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
 /// Core trait for file access operations using byte-based navigation
 ///
@@ -53,6 +54,7 @@ pub trait FileAccessor: Send + Sync {
         &self,
         start_byte: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>>;
 
     /// Find previous occurrence using a search function searching backward from byte position
@@ -74,6 +76,7 @@ pub trait FileAccessor: Send + Sync {
         &self,
         start_byte: u64,
         search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>>;
 
     /// Get the total file size in bytes

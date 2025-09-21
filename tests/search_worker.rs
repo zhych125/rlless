@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
@@ -177,6 +178,7 @@ async fn execute_search_followed_by_viewport_load() {
             direction: SearchDirection::Forward,
             options: SearchOptions::default(),
             origin_byte: 0,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .unwrap();
@@ -226,6 +228,7 @@ async fn navigate_match_advances_active_context() {
             direction: SearchDirection::Forward,
             options: SearchOptions::default(),
             origin_byte: 0,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .unwrap();
@@ -243,6 +246,7 @@ async fn navigate_match_advances_active_context() {
             request_id: 2,
             traversal: MatchTraversal::Next,
             current_top: first_match,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .unwrap();
@@ -281,6 +285,7 @@ async fn update_context_enables_navigation_without_execute() {
             request_id: 1,
             traversal: MatchTraversal::Next,
             current_top: 0,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .unwrap();
@@ -317,6 +322,7 @@ async fn execute_search_with_invalid_regex_returns_error() {
             direction: SearchDirection::Forward,
             options,
             origin_byte: 0,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .unwrap();

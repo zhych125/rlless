@@ -12,6 +12,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use lru::LruCache;
 use parking_lot::RwLock;
 use std::num::NonZeroUsize;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -66,6 +67,7 @@ pub trait SearchEngine: Send + Sync {
         pattern: &str,
         start_byte: u64,
         options: &SearchOptions,
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>>;
 
     /// Search for the previous occurrence of a pattern
@@ -83,6 +85,7 @@ pub trait SearchEngine: Send + Sync {
         pattern: &str,
         start_byte: u64,
         options: &SearchOptions,
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>>;
 
     /// Get match ranges for a specific line
@@ -275,6 +278,7 @@ impl SearchEngine for RipgrepEngine {
         pattern: &str,
         start_byte: u64,
         options: &SearchOptions,
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>> {
         // Get or create matcher
         let matcher = self.get_or_create_matcher(pattern, options)?;
@@ -285,7 +289,7 @@ impl SearchEngine for RipgrepEngine {
         // Define the search operation
         let search_operation = async {
             self.file_accessor
-                .find_next_match(start_byte, &search_fn)
+                .find_next_match(start_byte, &search_fn, cancel_flag)
                 .await
         };
 
@@ -311,6 +315,7 @@ impl SearchEngine for RipgrepEngine {
         pattern: &str,
         start_byte: u64,
         options: &SearchOptions,
+        cancel_flag: Option<&AtomicBool>,
     ) -> Result<Option<u64>> {
         // Get or create matcher
         let matcher = self.get_or_create_matcher(pattern, options)?;
@@ -321,7 +326,7 @@ impl SearchEngine for RipgrepEngine {
         // Define the search operation
         let search_operation = async {
             self.file_accessor
-                .find_prev_match(start_byte, &search_fn)
+                .find_prev_match(start_byte, &search_fn, cancel_flag)
                 .await
         };
 
@@ -414,6 +419,7 @@ mod tests {
             &self,
             start_byte: u64,
             search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+            _cancel_flag: Option<&AtomicBool>,
         ) -> Result<Option<u64>> {
             let start_line = self.find_line_at_byte(start_byte).unwrap_or(0);
 
@@ -430,6 +436,7 @@ mod tests {
             &self,
             start_byte: u64,
             search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+            _cancel_flag: Option<&AtomicBool>,
         ) -> Result<Option<u64>> {
             let start_line = self
                 .find_line_at_byte(start_byte)
@@ -496,7 +503,7 @@ mod tests {
         let engine = create_test_engine();
         let options = SearchOptions::default();
 
-        let result = engine.search_from("fox", 0, &options).await.unwrap();
+        let result = engine.search_from("fox", 0, &options, None).await.unwrap();
         assert!(result.is_some());
 
         let byte_position = result.unwrap();
@@ -517,7 +524,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.search_from("FOX", 0, &options).await.unwrap();
+        let result = engine.search_from("FOX", 0, &options, None).await.unwrap();
         assert!(result.is_some());
 
         let byte_position = result.unwrap();
@@ -538,7 +545,10 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.search_from(r"qu\w+k", 0, &options).await.unwrap();
+        let result = engine
+            .search_from(r"qu\w+k", 0, &options, None)
+            .await
+            .unwrap();
         assert!(result.is_some());
 
         let byte_position = result.unwrap();
@@ -560,12 +570,12 @@ mod tests {
         };
 
         // Should find "box" as a whole word in line 2 ("Pack my box with five dozen liquor jugs")
-        let result = engine.search_from("box", 0, &options).await.unwrap();
+        let result = engine.search_from("box", 0, &options, None).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), 44); // Line 2 starts at byte 44
 
         // Should NOT find "ox" as it's part of "fox"
-        let result = engine.search_from("ox", 0, &options).await.unwrap();
+        let result = engine.search_from("ox", 0, &options, None).await.unwrap();
         assert!(result.is_none());
     }
 
@@ -575,7 +585,10 @@ mod tests {
         let options = SearchOptions::default();
 
         // Search backward from near end of file for "jump" - should find in line 2
-        let result = engine.search_prev("jump", 100, &options).await.unwrap();
+        let result = engine
+            .search_prev("jump", 100, &options, None)
+            .await
+            .unwrap();
         assert!(result.is_some());
 
         let byte_position = result.unwrap();
@@ -588,10 +601,10 @@ mod tests {
         let options = SearchOptions::default();
 
         // First search
-        let result1 = engine.search_from("fox", 0, &options).await.unwrap();
+        let result1 = engine.search_from("fox", 0, &options, None).await.unwrap();
 
         // Second search (should use cached regex matcher)
-        let result2 = engine.search_from("fox", 0, &options).await.unwrap();
+        let result2 = engine.search_from("fox", 0, &options, None).await.unwrap();
 
         // Both searches should return the same result
         assert_eq!(result1, result2);
@@ -606,7 +619,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = engine.search_from("[invalid", 0, &options).await;
+        let result = engine.search_from("[invalid", 0, &options, None).await;
         assert!(result.is_err());
     }
 
@@ -621,7 +634,7 @@ mod tests {
         };
 
         // This search should complete successfully
-        let result = engine.search_from("fox", 0, &options).await;
+        let result = engine.search_from("fox", 0, &options, None).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }

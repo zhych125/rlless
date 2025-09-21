@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Result, RllessError};
 use crate::file_handler::FileAccessor;
 use crate::input::SearchDirection;
 use crate::render::protocol::{
@@ -6,6 +6,7 @@ use crate::render::protocol::{
     ViewportRequest,
 };
 use crate::search::{RipgrepEngine, SearchEngine, SearchOptions};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -73,16 +74,25 @@ impl WorkerState {
                 direction,
                 options,
                 origin_byte,
+                cancel_flag,
             } => HandlerOutcome::respond(
-                self.execute_search(request_id, pattern, direction, options, origin_byte)
-                    .await,
+                self.execute_search(
+                    request_id,
+                    pattern,
+                    direction,
+                    options,
+                    origin_byte,
+                    cancel_flag,
+                )
+                .await,
             ),
             SearchCommand::NavigateMatch {
                 request_id,
                 traversal,
                 current_top,
+                cancel_flag,
             } => HandlerOutcome::respond(
-                self.navigate_match(request_id, traversal, current_top)
+                self.navigate_match(request_id, traversal, current_top, cancel_flag)
                     .await,
             ),
             SearchCommand::UpdateSearchContext(new_context) => {
@@ -149,6 +159,7 @@ impl WorkerState {
         direction: SearchDirection,
         options: SearchOptions,
         origin_byte: u64,
+        cancel_flag: Arc<AtomicBool>,
     ) -> SearchResponse {
         let mut new_context = SearchContext {
             pattern: Arc::clone(&pattern),
@@ -158,15 +169,21 @@ impl WorkerState {
         };
 
         let search_future = match direction {
-            SearchDirection::Forward => {
-                self.search_engine
-                    .search_from(pattern.as_ref(), origin_byte, &options)
-            }
-            SearchDirection::Backward => {
-                self.search_engine
-                    .search_prev(pattern.as_ref(), origin_byte, &options)
-            }
+            SearchDirection::Forward => self.search_engine.search_from(
+                pattern.as_ref(),
+                origin_byte,
+                &options,
+                Some(cancel_flag.as_ref()),
+            ),
+            SearchDirection::Backward => self.search_engine.search_prev(
+                pattern.as_ref(),
+                origin_byte,
+                &options,
+                Some(cancel_flag.as_ref()),
+            ),
         };
+        // Responsibility for honouring the cancel token lives in the engine/accessor so we can
+        // avoid queueing a separate cancel command (the queue itself remains FIFO).
 
         match search_future.await {
             Ok(Some(byte)) => {
@@ -194,7 +211,13 @@ impl WorkerState {
                     message: Some("Pattern not found".to_string()),
                 }
             }
-            Err(error) => SearchResponse::Error { request_id, error },
+            Err(error) => match error {
+                RllessError::Cancelled => SearchResponse::SearchCancelled { request_id },
+                other => SearchResponse::Error {
+                    request_id,
+                    error: other,
+                },
+            },
         }
     }
 
@@ -203,6 +226,7 @@ impl WorkerState {
         request_id: RequestId,
         traversal: MatchTraversal,
         current_top: u64,
+        cancel_flag: Arc<AtomicBool>,
     ) -> SearchResponse {
         let ctx_snapshot = match self.context.as_ref() {
             Some(ctx) => (ctx.direction, ctx.options.clone(), Arc::clone(&ctx.pattern)),
@@ -231,12 +255,22 @@ impl WorkerState {
             (MatchTraversal::Next, SearchDirection::Forward)
             | (MatchTraversal::Previous, SearchDirection::Backward) => {
                 self.search_engine
-                    .search_from(pattern.as_ref(), start_byte, &options)
+                    .search_from(
+                        pattern.as_ref(),
+                        start_byte,
+                        &options,
+                        Some(cancel_flag.as_ref()),
+                    )
                     .await
             }
             _ => {
                 self.search_engine
-                    .search_prev(pattern.as_ref(), start_byte, &options)
+                    .search_prev(
+                        pattern.as_ref(),
+                        start_byte,
+                        &options,
+                        Some(cancel_flag.as_ref()),
+                    )
                     .await
             }
         };
@@ -261,7 +295,13 @@ impl WorkerState {
                 match_byte: None,
                 message: Some("Pattern not found".to_string()),
             },
-            Err(error) => SearchResponse::Error { request_id, error },
+            Err(error) => match error {
+                RllessError::Cancelled => SearchResponse::SearchCancelled { request_id },
+                other => SearchResponse::Error {
+                    request_id,
+                    error: other,
+                },
+            },
         }
     }
 
@@ -449,6 +489,7 @@ mod tests {
             &self,
             _start_byte: u64,
             _search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+            _cancel_flag: Option<&AtomicBool>,
         ) -> Result<Option<u64>> {
             Ok(None)
         }
@@ -457,6 +498,7 @@ mod tests {
             &self,
             _start_byte: u64,
             _search_fn: &(dyn for<'a> Fn(&'a str) -> Vec<(usize, usize)> + Send + Sync),
+            _cancel_flag: Option<&AtomicBool>,
         ) -> Result<Option<u64>> {
             Ok(None)
         }
